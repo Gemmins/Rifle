@@ -3,15 +3,20 @@ package rifle
 import "core:sys/linux"
 import "core:sys/linux/uring"
 
-// TODO: Useful errors. Need to make RifleError into tagged union or smthn
+// TODO: Useful errors. Need to make RifleError into tagged union or smthn.
+// TODO: Need to deal with cleanup for failures mid proc as we currently just return directly out in most cases. allocation failure etc.
+// TODO: Handle timeouts
+// TODO: Check read/write lenghts
+// TODO: Handle when SQ is full
 
 UringIO :: struct {
-	ring:       uring.Ring,
-	config:     UringConfig,
-	buffer:     []u8,
-	file_index: FileIndex,
-	op_timeout: linux.Time_Spec,
-	dirfd:      linux.Fd,
+	ring:          uring.Ring,
+	config:        UringConfig,
+	buffer:        []u8,
+	file_index:    FileIndex,
+	op_timeout:    linux.Time_Spec,
+	dirfd:         linux.Fd,
+	pending_syncs: u32,
 }
 
 UringConfig :: struct {
@@ -22,10 +27,15 @@ UringConfig :: struct {
 
 FileIndex :: struct {
 	file_descriptors: []linux.Fd,
-	file_states:      []FileState,
-	cache_indices:    []u16,
+	slots:            []FileSlot,
 	file_map:         map[i64]u16,
 	slot_stack:       Stack(u16),
+}
+
+FileSlot :: struct {
+	file_id:     i64,
+	state:       FileState,
+	cache_index: u16,
 }
 
 FileState :: enum u8 {
@@ -66,34 +76,53 @@ get_file_slot :: proc(files: ^FileIndex, file: RifleFile) -> (u16, bool) {
 }
 
 register_file :: proc(files: ^FileIndex, file: RifleFile, cache_index: u16) -> (u16, bool) {
+	if _, exists := files.file_map[file.id]; exists {
+		return 0, false
+	}
+
 	slot, ok := stack_pop(&files.slot_stack)
 	if !ok {
 		return 0, false
 	}
 
 	assert(u32(slot) < (1 << 12))
+	assert(int(slot) < len(files.slots))
+	assert(files.slots[slot].state == .Empty)
 
 	files.file_map[file.id] = slot
-	files.cache_indices[slot] = cache_index
+	files.slots[slot] = {
+		file_id     = file.id,
+		cache_index = cache_index,
+	}
 
 	return slot, true
 }
 
-remove_file :: proc(files: ^FileIndex, file: RifleFile) -> bool {
-	slot, ok := files.file_map[file.id]
-	if !ok {
-		return false
+remove_file :: proc(files: ^FileIndex, slot: u16) {
+	assert(int(slot) < len(files.slots))
+
+	entry := &files.slots[slot]
+	file_id := entry.file_id
+
+	when !ODIN_DISABLE_ASSERT {
+		mapped_slot, exists := files.file_map[file_id]
+		assert(exists && mapped_slot == slot)
 	}
+	assert(entry.state == .Closing)
+	assert(files.slot_stack.top < i64(len(files.slot_stack.data)))
 
-	if !stack_push(&files.slot_stack, slot) {
-		return false
+	_, _ = delete_key(&files.file_map, file_id)
+	entry^ = {}
+
+	returned := stack_push(&files.slot_stack, slot)
+	assert(returned)
+}
+
+check_sqe_space :: proc(ring: ^uring.Ring, n: int) -> RifleError {
+	if n > len(ring.sq.sqes) - int(uring.sq_ready(ring)) {
+		return .GenericError
 	}
-
-	_, _ = delete_key(&files.file_map, file.id)
-	files.file_states[slot] = .Empty
-	files.cache_indices[slot] = 0
-
-	return true
+	return nil
 }
 
 link_timeout :: proc(
@@ -114,9 +143,10 @@ link_timeout :: proc(
 	return sqe, nil
 }
 
-new_uring_io :: proc(config: UringConfig) -> IO {
+new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> IO {
 	uring_io := new(UringIO, context.allocator)
 	uring_io.config = config
+	uring_io.dirfd = dirfd
 	io := IO{rawptr(uring_io), uring_init, uring_deinit, uring_open, uring_close, uring_readat, uring_writeat, uring_sync, uring_delete, uring_poll}
 
 	return io
@@ -140,9 +170,8 @@ uring_init :: proc(ctx: rawptr, cache_buffer: []u8) -> RifleError {
 	}
 
 	io.file_index.file_descriptors, _ = make([]linux.Fd, io.config.num_files, context.allocator)
+	io.file_index.slots, _ = make([]FileSlot, io.config.num_files, context.allocator)
 	io.file_index.file_map, _ = make(map[i64]u16, io.config.num_files, context.allocator)
-	io.file_index.file_states, _ = make([]FileState, io.config.num_files, context.allocator)
-	io.file_index.cache_indices, _ = make([]u16, io.config.num_files, context.allocator)
 	_ = stack_init(&io.file_index.slot_stack, cast(i64)io.config.num_files)
 	for i in 0 ..< io.config.num_files {
 		io.file_index.file_descriptors[i] = -1
@@ -173,25 +202,36 @@ uring_deinit :: proc(ctx: rawptr) -> RifleError {
 	uring.destroy(&io.ring)
 
 	_ = delete(io.file_index.file_descriptors)
+	_ = delete(io.file_index.slots)
 	_ = delete(io.file_index.file_map)
-	_ = delete(io.file_index.file_states)
-	_ = delete(io.file_index.cache_indices)
 	stack_deinit(&io.file_index.slot_stack)
 	_ = free(io)
 
 	return nil
 }
 
-//TODO: need to use registered file in known slot to link with falloc
 uring_open :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
-	file_slot, _ := register_file(&io.file_index, file, user_data.file_index) //TODO: maybe check for file already open
+	check_sqe_space(&io.ring, 3) or_return
+
+	file_slot, registered := register_file(&io.file_index, file, user_data.file_index)
+	if !registered {
+		return .GenericError
+	}
 	ud.file_index = file_slot
 
 	ud.op = .OPEN
-	open_sqe, open_ok := uring.openat(&io.ring, cast(u64)ud, io.dirfd, file.path, {}, {.CREAT, .DIRECT, .RDWR}, cast(u32)file_slot + 1)
+	open_sqe, open_ok := uring.openat(
+		&io.ring,
+		cast(u64)ud,
+		io.dirfd,
+		file.path,
+		{.IRUSR, .IWUSR, .IRGRP, .IWGRP, .IROTH, .IWOTH},
+		{.CREAT, .DIRECT, .RDWR},
+		cast(u32)file_slot + 1,
+	)
 	if !open_ok {
 		return .GenericError
 	}
@@ -206,7 +246,7 @@ uring_open :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rifle
 
 	link_timeout(&io.ring, ud, &io.op_timeout, {}) or_return
 
-	io.file_index.file_states[file_slot] = .Opening
+	io.file_index.slots[file_slot].state = .Opening
 
 	return nil
 }
@@ -219,6 +259,7 @@ uring_close :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rifl
 	if !exists {
 		return .GenericError
 	}
+	assert(io.file_index.slots[file_slot].state == .Open, "caller must sync the file and wait for completion before closing")
 	ud.file_index = file_slot
 
 	ud.op = .CLOSE
@@ -226,11 +267,13 @@ uring_close :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rifl
 	if !ok {
 		return .GenericError
 	}
-	sqe.flags |= {.IO_LINK}
+
+	// Drain to close after any other ops on this file
+	sqe.flags |= {.IO_LINK, .IO_DRAIN}
 
 	link_timeout(&io.ring, ud, &io.op_timeout, {}) or_return
 
-	io.file_index.file_states[file_slot] = .Closing
+	io.file_index.slots[file_slot].state = .Closing
 
 	return nil
 }
@@ -240,17 +283,31 @@ uring_readat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u
 	ud := cast(UringUserData)user_data
 
 	file_slot, exists := get_file_slot(&io.file_index, file)
+	assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot read from a closing file")
+	assert(!exists || io.file_index.slots[file_slot].state != .Opening, "caller must wait for opening to complete")
 
-	if !exists { 	// Do we need to check the state? If the file is "opening" what do we do? Is that even a state we can reach. Idk. Should the cache protect this?
-		file_slot, _ = register_file(&io.file_index, file, user_data.file_index)
+	if !exists {
+		check_sqe_space(&io.ring, 4) or_return
+		registered: bool
+		file_slot, registered = register_file(&io.file_index, file, user_data.file_index)
+		if !registered {
+			return .GenericError
+		}
 		ud.file_index = file_slot
 		ud.op = .OPEN
-		open_sqe, open_ok := uring.openat(&io.ring, cast(u64)ud, io.dirfd, file.path, {}, {.DIRECT, .RDWR}, cast(u32)file_slot)
+		open_sqe, open_ok := uring.openat(&io.ring, cast(u64)ud, io.dirfd, file.path, {}, {.DIRECT, .RDWR}, cast(u32)file_slot + 1)
 		if !open_ok {
 			return .GenericError
 		}
 		open_sqe.flags |= {.IO_LINK}
-		io.file_index.file_states[file_slot] = .Opening
+
+		ud.op = .ALLOCATE
+		falloc_sqe, falloc_ok := fallocate(&io.ring, cast(u64)ud, cast(linux.Fd)file_slot, {}, 0, io.config.file_size)
+		if !falloc_ok {
+			return .GenericError
+		}
+		falloc_sqe.flags |= {.IO_LINK, .FIXED_FILE}
+		io.file_index.slots[file_slot].state = .Opening
 	}
 
 	ud.file_index = file_slot
@@ -271,17 +328,39 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 	ud := cast(UringUserData)user_data
 
 	file_slot, exists := get_file_slot(&io.file_index, file)
+	assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot write to a closing file")
+	assert(!exists || io.file_index.slots[file_slot].state != .Opening, "caller must wait for opening to complete")
 
 	if !exists {
-		file_slot, _ = register_file(&io.file_index, file, user_data.file_index)
+		check_sqe_space(&io.ring, 4) or_return
+		registered: bool
+		file_slot, registered = register_file(&io.file_index, file, user_data.file_index)
+		if !registered {
+			return .GenericError
+		}
 		ud.file_index = file_slot
 		ud.op = .OPEN
-		open_sqe, open_ok := uring.openat(&io.ring, cast(u64)ud, io.dirfd, file.path, {}, {.DIRECT, .RDWR, .CREAT}, cast(u32)file_slot)
+		open_sqe, open_ok := uring.openat(
+			&io.ring,
+			cast(u64)ud,
+			io.dirfd,
+			file.path,
+			{.IRUSR, .IWUSR, .IRGRP, .IWGRP, .IROTH, .IWOTH},
+			{.DIRECT, .RDWR, .CREAT},
+			cast(u32)file_slot + 1,
+		)
 		if !open_ok {
 			return .GenericError
 		}
 		open_sqe.flags |= {.IO_LINK}
-		io.file_index.file_states[file_slot] = .Opening
+
+		ud.op = .ALLOCATE
+		falloc_sqe, falloc_ok := fallocate(&io.ring, cast(u64)ud, cast(linux.Fd)file_slot, {}, 0, io.config.file_size)
+		if !falloc_ok {
+			return .GenericError
+		}
+		falloc_sqe.flags |= {.IO_LINK, .FIXED_FILE}
+		io.file_index.slots[file_slot].state = .Opening
 	}
 
 	ud.file_index = file_slot
@@ -291,7 +370,7 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 		return .GenericError
 	}
 	sqe.flags |= {.IO_LINK, .FIXED_FILE}
-	io.file_index.file_states[file_slot] = .Dirty
+	io.file_index.slots[file_slot].state = .Dirty
 	link_timeout(&io.ring, ud, &io.op_timeout, {}) or_return
 
 	return nil
@@ -301,14 +380,22 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
-	files := stack_peek_all(&io.file_index.slot_stack)
+	assert(io.pending_syncs == 0, "caller must wait for the previous sync batch")
+	dirty_files := 0
+	for _, slot in io.file_index.file_map {
+		if io.file_index.slots[slot].state == .Dirty {
+			dirty_files += 1
+		}
+	}
+	check_sqe_space(&io.ring, 2 * dirty_files) or_return
+
 	ud.op = .SYNC
 	flags := linux.IO_Uring_Fsync_Flags{.DATASYNC}
 	first := true
-	for i in 0 ..< len(files) {
-		if io.file_index.file_states[files[i]] == .Dirty {
-			ud.file_index = files[i]
-			sqe, ok := uring.fsync(&io.ring, cast(u64)ud, cast(linux.Fd)files[i], flags)
+	for _, slot in io.file_index.file_map { 	// Maybe change way to get all slots
+		if io.file_index.slots[slot].state == .Dirty {
+			ud.file_index = slot
+			sqe, ok := uring.fsync(&io.ring, cast(u64)ud, cast(linux.Fd)slot, flags)
 			if !ok {
 				return .GenericError
 			}
@@ -319,6 +406,8 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 			sqe.flags |= {.FIXED_FILE, .IO_LINK}
 
 			link_timeout(&io.ring, ud, &io.op_timeout, {}) or_return
+			io.file_index.slots[slot].state = .Flushing
+			io.pending_syncs += 1
 		}
 	}
 
@@ -356,22 +445,31 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 	head := io.ring.cq.head^
 	mask := io.ring.cq.mask
 	j: u32 = 0
-	for i in 0 ..< n {
+	i: u32 = 0
+	for ; i < n && cast(int)j < len(completions); i += 1 {
 		cqe := &io.ring.cq.cqes[(head + i) & mask]
+		ud := cast(UringUserData)cqe.user_data
 
 		completion := IOCompletion {
 			user_data = cast(IOUserData)cqe.user_data,
 			res       = cqe.res,
 		}
 
-		completion.user_data.file_index = io.file_index.cache_indices[completion.user_data.file_index]
+		slot := ud.file_index
 
-		// Need to check actual success/ failure for these
-		// For now just assuming success
-		switch (cast(UringUserData)(cqe.user_data)).op {
+		// Internal completions do not need file slot metadata.
+		if ud.op != .OPEN && ud.op != .TIMEOUT && ud.op != .DELETE {
+			assert(int(slot) < len(io.file_index.slots))
+			completion.user_data.file_index = io.file_index.slots[slot].cache_index
+		}
+
+		switch ud.op {
 		case .OPEN:
 		case .CLOSE:
-			io.file_index.file_states[completion.user_data.file_index] = .Empty
+			assert(io.file_index.slots[slot].state == .Closing)
+			if cqe.res == 0 {
+				remove_file(&io.file_index, slot)
+			}
 			completion.user_data.op = .CLOSE
 			completions[j] = completion
 			j += 1
@@ -384,8 +482,10 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 			completions[j] = completion
 			j += 1
 		case .SYNC:
-			if (io.file_index.file_states[completion.user_data.file_index] == .Flushing) { 	// Checks for no write in the mean time
-				io.file_index.file_states[completion.user_data.file_index] = .Open
+			assert(io.pending_syncs > 0)
+			io.pending_syncs -= 1
+			if io.file_index.slots[slot].state == .Flushing {
+				io.file_index.slots[slot].state = (cqe.res == 0) ? .Open : .Dirty
 			}
 			completions[j] = completion
 			j += 1
@@ -394,7 +494,9 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 			completions[j] = completion
 			j += 1
 		case .ALLOCATE:
-			io.file_index.file_states[completion.user_data.file_index] = .Open
+			if cqe.res == 0 && io.file_index.slots[slot].state == .Opening {
+				io.file_index.slots[slot].state = .Open
+			}
 			completion.user_data.op = .OPEN
 			completions[j] = completion
 			j += 1
@@ -403,7 +505,7 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 		}
 	}
 
-	uring.cq_advance(&io.ring, n)
+	uring.cq_advance(&io.ring, i)
 
 	return j, nil
 }

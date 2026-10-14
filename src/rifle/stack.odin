@@ -43,10 +43,3 @@ stack_peek :: proc(stack: ^Stack($T)) -> (T, bool) {
 	}
 	return stack.data[stack.top - 1], true
 }
-
-stack_peek_all :: proc(stack: ^Stack($T)) -> []T {
-	if stack.top == 0 {
-		return nil
-	}
-	return stack.data[0:stack.top - 1]
-}

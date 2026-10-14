@@ -57,7 +57,7 @@ new_test_io :: proc(t: ^testing.T) -> ^Test_IO {
 	s.buffer = buffer
 
 	config := rifle.UringConfig{uring.DEFAULT_PARAMS, 128, 1 << 20}
-	s.io = rifle.new_uring_io(config)
+	s.io = rifle.new_uring_io(config, linux.AT_FDCWD)
 
 	if !testing.expect(t, s.io.data != nil) {
 		testing.fail_now(t)
@@ -142,6 +142,18 @@ open_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, cache_index
 }
 
 close_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, cache_index: u16) {
+	// Test cleanup follows the same flush-before-close contract as callers.
+	uio := cast(^rifle.UringIO)s.io.data
+	dirty_count := 0
+	for _, slot in uio.file_index.file_map {
+		if uio.file_index.slots[slot].state == .Dirty {dirty_count += 1}
+	}
+	if dirty_count > 0 {
+		extra_require(t, s.io.sync(s.io.data, {op = .SYNC}) == nil)
+		for event in poll_events(t, s, dirty_count) {
+			extra_require(t, event.user_data.op == .SYNC && event.res == 0)
+		}
+	}
 	data := rifle.IOUserData {
 		op         = .CLOSE,
 		file_index = cache_index,
@@ -161,7 +173,7 @@ close_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, cache_inde
 new_uring :: proc(t: ^testing.T) {
 	config := rifle.UringConfig{uring.DEFAULT_PARAMS, 128, 1 << 20}
 
-	io := rifle.new_uring_io(config)
+	io := rifle.new_uring_io(config, linux.AT_FDCWD)
 
 	testing.expect(t, io.data != nil)
 

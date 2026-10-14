@@ -1,0 +1,11 @@
+Empty -> Read_Pending   : want to load data here
+Empty -> Dirty          : records written into this page
+Read_Pending -> Loading : poll issues read
+Loading -> Clean        : read completes
+Dirty -> Flushing       : poll issues write (normally only full pages)
+Flushing -> Clean       : write completes
+Clean -> Empty          : eviction (not normally used)
+Clean -> Dirty          : partial block is written to
+Clean -> Read_Pending   : page evicted for read
+
+The only case in which a block can be evicted is when it is clean and its refcount is 0

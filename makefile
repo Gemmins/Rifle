@@ -10,7 +10,7 @@ debug:
 
 release:
 	mkdir -p bin
-	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -no-bounds-check -o:speed -show-timings
+	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -no-bounds-check -disable-assert -o:speed -show-timings
 
 rdbg: 
 	mkdir -p bin
