@@ -1,4 +1,4 @@
-.PHONY: all debug release run test check check-watch bench bench-plot clean debug-query run-query repl run-repl
+.PHONY: all debug release run test clean
 
 COLLECTIONS := -collection:rifle=./src
 
@@ -14,7 +14,7 @@ release:
 
 rdbg: 
 	mkdir -p bin
-	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -no-bounds-check -debug -o:speed -show-timings
+	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -no-bounds-check -disable-assert -debug -o:speed -show-timings
 
 run: debug
 	./bin/rifle

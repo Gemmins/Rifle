@@ -212,7 +212,7 @@ open_close_file :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	track_file(s, path)
 
-	file := rifle.RifleFile{100, path}
+	file := rifle.RifleFile{id = 100, path = path}
 	data := rifle.IOUserData {
 		page_index = 123,
 		file_index = 7,
@@ -244,7 +244,7 @@ reopen_file :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	track_file(s, path)
 
-	file := rifle.RifleFile{100, path}
+	file := rifle.RifleFile{id = 100, path = path}
 
 	open_file(t, s, file, 7)
 	close_file(t, s, file, 7)
@@ -261,7 +261,7 @@ write_read_file :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	track_file(s, path)
 
-	file := rifle.RifleFile{100, path}
+	file := rifle.RifleFile{id = 100, path = path}
 	open_file(t, s, file, 7)
 
 	write_buffer := s.buffer[:PAGE_SIZE]
@@ -308,7 +308,7 @@ write_at_offsets :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	track_file(s, path)
 
-	file := rifle.RifleFile{100, path}
+	file := rifle.RifleFile{id = 100, path = path}
 	open_file(t, s, file, 7)
 
 	first := s.buffer[:PAGE_SIZE]
@@ -388,7 +388,7 @@ batched_writes :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	track_file(s, path)
 
-	file := rifle.RifleFile{100, path}
+	file := rifle.RifleFile{id = 100, path = path}
 	open_file(t, s, file, 7)
 
 	expected: [8]rifle.IOUserData
@@ -448,8 +448,8 @@ multiple_files :: proc(t: ^testing.T) {
 	track_file(s, path_a)
 	track_file(s, path_b)
 
-	file_a := rifle.RifleFile{100, path_a}
-	file_b := rifle.RifleFile{200, path_b}
+	file_a := rifle.RifleFile{id = 100, path = path_a}
+	file_b := rifle.RifleFile{id = 200, path = path_b}
 
 	data_a := rifle.IOUserData {
 		op         = .OPEN,
@@ -502,7 +502,7 @@ open_delete_file :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	track_file(s, path)
 
-	file := rifle.RifleFile{100, path}
+	file := rifle.RifleFile{id = 100, path = path}
 
 	testing.expect(t, !os.exists(path))
 
@@ -617,7 +617,7 @@ uring_extra_reopen_preserves_data :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_reopen.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{301, path}
+	file := rifle.RifleFile{id = 301, path = path}
 	open_file(t, s, file, 7)
 	extra_pattern(s.buffer[:PAGE_SIZE], 11)
 	extra_write(t, s, file, 7, s.buffer[:PAGE_SIZE], 3 * PAGE_SIZE)
@@ -632,7 +632,7 @@ uring_extra_last_registered_page_and_file_page :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_last_page.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{302, path}
+	file := rifle.RifleFile{id = 302, path = path}
 	open_file(t, s, file, 7)
 	last := s.buffer[BUFFER_SIZE - PAGE_SIZE:]
 	extra_pattern(last, 12)
@@ -648,7 +648,7 @@ uring_extra_multi_page_transfer :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_multi_page.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{303, path}
+	file := rifle.RifleFile{id = 303, path = path}
 	open_file(t, s, file, 7)
 	source := s.buffer[:3 * PAGE_SIZE]
 	destination := s.buffer[5 * PAGE_SIZE:8 * PAGE_SIZE]
@@ -663,7 +663,7 @@ uring_extra_overwrite_preserves_neighbours :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_overwrite.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{304, path}
+	file := rifle.RifleFile{id = 304, path = path}
 	open_file(t, s, file, 7)
 	for i in 0 ..< 3 {
 		extra_pattern(s.buffer[:PAGE_SIZE], i + 1)
@@ -684,7 +684,7 @@ uring_extra_batched_reads :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_batched_reads.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{305, path}
+	file := rifle.RifleFile{id = 305, path = path}
 	open_file(t, s, file, 7)
 	for i in 0 ..< 8 {
 		extra_pattern(s.buffer[:PAGE_SIZE], i + 20)
@@ -716,7 +716,7 @@ uring_extra_batched_reads :: proc(t: ^testing.T) {
 uring_extra_file_isolation :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	paths := [2]cstring{"/tmp/rifle_extra_isolation_a.rfl", "/tmp/rifle_extra_isolation_b.rfl"}
-	files := [2]rifle.RifleFile{{306, paths[0]}, {900001, paths[1]}}
+	files := [2]rifle.RifleFile{{id = 306, path = paths[0]}, {id = 900001, path = paths[1]}}
 	indices := [2]u16{7, 42}
 	expected: [2]rifle.IOUserData
 	results := [2]i32{PAGE_SIZE, PAGE_SIZE}
@@ -754,7 +754,7 @@ uring_extra_slot_reuse :: proc(t: ^testing.T) {
 	// More distinct file identities than available slots; cache indices stay
 	// within capacity, but change as a registered slot is recycled.
 	for round in 0 ..< 8 {
-		file := rifle.RifleFile{i64(400 + round), paths[round % 2]}
+		file := rifle.RifleFile{id = i64(400 + round), path = paths[round % 2]}
 		index := u16(round % 2)
 		open_file(t, s, file, index)
 		extra_pattern(s.buffer[:PAGE_SIZE], round + 40)
@@ -769,7 +769,7 @@ uring_extra_one_completion_at_a_time :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_small_poll.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{307, path}
+	file := rifle.RifleFile{id = 307, path = path}
 	open_file(t, s, file, 7)
 	expected: [8]rifle.IOUserData
 	for i in 0 ..< 8 {
@@ -811,7 +811,7 @@ uring_extra_sync_before_write_reap :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_sync_pending.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{308, path}
+	file := rifle.RifleFile{id = 308, path = path}
 	open_file(t, s, file, 7)
 	extra_pattern(s.buffer[:PAGE_SIZE], 60)
 	write_data := rifle.IOUserData {
@@ -853,7 +853,7 @@ uring_extra_sync_before_write_reap :: proc(t: ^testing.T) {
 uring_extra_sync_multiple_dirty_files :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	paths := [2]cstring{"/tmp/rifle_extra_sync_a.rfl", "/tmp/rifle_extra_sync_b.rfl"}
-	files := [2]rifle.RifleFile{{309, paths[0]}, {310, paths[1]}}
+	files := [2]rifle.RifleFile{{id = 309, path = paths[0]}, {id = 310, path = paths[1]}}
 	indices := [2]u16{7, 42}
 	for i in 0 ..< 2 {
 		track_file(s, string(paths[i]))
@@ -887,7 +887,7 @@ uring_extra_delete_preserves_request_token :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	path :: "/tmp/rifle_extra_delete_token.rfl"
 	track_file(s, path)
-	file := rifle.RifleFile{311, path}
+	file := rifle.RifleFile{id = 311, path = path}
 	open_file(t, s, file, 7)
 	close_file(t, s, file, 7)
 	// DELETE uses a path, not a registered slot. Its token is opaque.

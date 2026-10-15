@@ -85,9 +85,11 @@ register_file :: proc(files: ^FileIndex, file: RifleFile, cache_index: u16) -> (
 		return 0, false
 	}
 
-	assert(u32(slot) < (1 << 12))
-	assert(int(slot) < len(files.slots))
-	assert(files.slots[slot].state == .Empty)
+	{
+		assert(u32(slot) < (1 << 12))
+		assert(int(slot) < len(files.slots))
+		assert(files.slots[slot].state == .Empty)
+	}
 
 	files.file_map[file.id] = slot
 	files.slots[slot] = {
@@ -99,23 +101,28 @@ register_file :: proc(files: ^FileIndex, file: RifleFile, cache_index: u16) -> (
 }
 
 remove_file :: proc(files: ^FileIndex, slot: u16) {
-	assert(int(slot) < len(files.slots))
+	{
+		assert(int(slot) < len(files.slots))
+	}
 
 	entry := &files.slots[slot]
 	file_id := entry.file_id
 
-	when !ODIN_DISABLE_ASSERT {
-		mapped_slot, exists := files.file_map[file_id]
-		assert(exists && mapped_slot == slot)
+	{
+		when !ODIN_DISABLE_ASSERT {
+			mapped_slot, exists := files.file_map[file_id]
+			assert(exists && mapped_slot == slot)
+			assert(entry.state == .Closing)
+			assert(files.slot_stack.top < i64(len(files.slot_stack.data)))
+		}
 	}
-	assert(entry.state == .Closing)
-	assert(files.slot_stack.top < i64(len(files.slot_stack.data)))
-
 	_, _ = delete_key(&files.file_map, file_id)
 	entry^ = {}
 
 	returned := stack_push(&files.slot_stack, slot)
-	assert(returned)
+	{
+		assert(returned)
+	}
 }
 
 check_sqe_space :: proc(ring: ^uring.Ring, n: int) -> RifleError {
@@ -259,7 +266,9 @@ uring_close :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rifl
 	if !exists {
 		return .GenericError
 	}
-	assert(io.file_index.slots[file_slot].state == .Open, "caller must sync the file and wait for completion before closing")
+	{
+		assert(io.file_index.slots[file_slot].state == .Open, "caller must sync the file and wait for completion before closing")
+	}
 	ud.file_index = file_slot
 
 	ud.op = .CLOSE
@@ -283,8 +292,10 @@ uring_readat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u
 	ud := cast(UringUserData)user_data
 
 	file_slot, exists := get_file_slot(&io.file_index, file)
-	assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot read from a closing file")
-	assert(!exists || io.file_index.slots[file_slot].state != .Opening, "caller must wait for opening to complete")
+	{
+		assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot read from a closing file")
+		assert(!exists || io.file_index.slots[file_slot].state != .Opening, "caller must wait for opening to complete")
+	}
 
 	if !exists {
 		check_sqe_space(&io.ring, 4) or_return
@@ -328,8 +339,10 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 	ud := cast(UringUserData)user_data
 
 	file_slot, exists := get_file_slot(&io.file_index, file)
-	assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot write to a closing file")
-	assert(!exists || io.file_index.slots[file_slot].state != .Opening, "caller must wait for opening to complete")
+	{
+		assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot write to a closing file")
+		assert(!exists || io.file_index.slots[file_slot].state != .Opening, "caller must wait for opening to complete")
+	}
 
 	if !exists {
 		check_sqe_space(&io.ring, 4) or_return
@@ -380,7 +393,9 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
-	assert(io.pending_syncs == 0, "caller must wait for the previous sync batch")
+	{
+		assert(io.pending_syncs == 0, "caller must wait for the previous sync batch")
+	}
 	dirty_files := 0
 	for _, slot in io.file_index.file_map {
 		if io.file_index.slots[slot].state == .Dirty {
@@ -459,14 +474,18 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 
 		// Internal completions do not need file slot metadata.
 		if ud.op != .OPEN && ud.op != .TIMEOUT && ud.op != .DELETE {
-			assert(int(slot) < len(io.file_index.slots))
+			{
+				assert(int(slot) < len(io.file_index.slots))
+			}
 			completion.user_data.file_index = io.file_index.slots[slot].cache_index
 		}
 
 		switch ud.op {
 		case .OPEN:
 		case .CLOSE:
-			assert(io.file_index.slots[slot].state == .Closing)
+			{
+				assert(io.file_index.slots[slot].state == .Closing)
+			}
 			if cqe.res == 0 {
 				remove_file(&io.file_index, slot)
 			}
@@ -482,7 +501,9 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 			completions[j] = completion
 			j += 1
 		case .SYNC:
-			assert(io.pending_syncs > 0)
+			{
+				assert(io.pending_syncs > 0)
+			}
 			io.pending_syncs -= 1
 			if io.file_index.slots[slot].state == .Flushing {
 				io.file_index.slots[slot].state = (cqe.res == 0) ? .Open : .Dirty
