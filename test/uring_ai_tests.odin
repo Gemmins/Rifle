@@ -109,7 +109,7 @@ expect_user_data :: proc(t: ^testing.T, events: []rifle.IOCompletion, expected: 
 		found := false
 
 		for data, i in expected {
-			if event.user_data == data {
+			if event.user_data == data && !seen[i] {
 				testing.expect(t, !seen[i])
 				seen[i] = true
 				found = true
@@ -125,10 +125,10 @@ expect_user_data :: proc(t: ^testing.T, events: []rifle.IOCompletion, expected: 
 	}
 }
 
-open_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, cache_index: u16) {
+open_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, page_index: u16) {
 	data := rifle.IOUserData {
 		op         = .OPEN,
-		file_index = cache_index,
+		page_index = u32(page_index),
 	}
 
 	err := s.io.open(s.io.data, data, file)
@@ -141,7 +141,7 @@ open_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, cache_index
 	testing.expect(t, events[0].res >= 0)
 }
 
-close_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, cache_index: u16) {
+close_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, page_index: u16) {
 	// Test cleanup follows the same flush-before-close contract as callers.
 	uio := cast(^rifle.UringIO)s.io.data
 	dirty_count := 0
@@ -150,13 +150,13 @@ close_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, cache_inde
 	}
 	if dirty_count > 0 {
 		extra_require(t, s.io.sync(s.io.data, {op = .SYNC}) == nil)
-		for event in poll_events(t, s, dirty_count) {
+		for event in poll_events(t, s, 1) {
 			extra_require(t, event.user_data.op == .SYNC && event.res == 0)
 		}
 	}
 	data := rifle.IOUserData {
 		op         = .CLOSE,
-		file_index = cache_index,
+		page_index = u32(page_index),
 	}
 
 	err := s.io.close(s.io.data, data, file)
@@ -215,7 +215,6 @@ open_close_file :: proc(t: ^testing.T) {
 	file := rifle.RifleFile{id = 100, path = path}
 	data := rifle.IOUserData {
 		page_index = 123,
-		file_index = 7,
 		op         = .OPEN,
 		payload    = 456,
 	}
@@ -273,7 +272,6 @@ write_read_file :: proc(t: ^testing.T) {
 
 	data := rifle.IOUserData {
 		page_index = 10,
-		file_index = 7,
 		op         = .WRITE,
 		payload    = 42,
 	}
@@ -322,14 +320,12 @@ write_at_offsets :: proc(t: ^testing.T) {
 
 	data_a := rifle.IOUserData {
 		op         = .WRITE,
-		file_index = 7,
 		page_index = 10,
 		payload    = 1,
 	}
 
 	data_b := rifle.IOUserData {
 		op         = .WRITE,
-		file_index = 7,
 		page_index = 14,
 		payload    = 2,
 	}
@@ -349,7 +345,6 @@ write_at_offsets :: proc(t: ^testing.T) {
 
 	read_data := rifle.IOUserData {
 		op         = .READ,
-		file_index = 7,
 		page_index = 14,
 		payload    = 3,
 	}
@@ -402,7 +397,6 @@ batched_writes :: proc(t: ^testing.T) {
 
 		data := rifle.IOUserData {
 			op         = .WRITE,
-			file_index = 7,
 			page_index = u32(i + 20),
 			payload    = u32(i + 1),
 		}
@@ -421,7 +415,7 @@ batched_writes :: proc(t: ^testing.T) {
 
 		found := false
 		for data, i in expected {
-			if event.user_data == data {
+			if event.user_data == data && !seen[i] {
 				testing.expect(t, !seen[i])
 				seen[i] = true
 				found = true
@@ -453,13 +447,13 @@ multiple_files :: proc(t: ^testing.T) {
 
 	data_a := rifle.IOUserData {
 		op         = .OPEN,
-		file_index = 7,
+		page_index = u32(7),
 		payload    = 10,
 	}
 
 	data_b := rifle.IOUserData {
 		op         = .OPEN,
-		file_index = 12,
+		page_index = u32(12),
 		payload    = 20,
 	}
 
@@ -559,7 +553,7 @@ extra_collect :: proc(t: ^testing.T, s: ^Test_IO, expected: []rifle.IOUserData, 
 		for event in s.completions[:int(n)] {
 			found := false
 			for data, i in expected {
-				if event.user_data == data {
+				if event.user_data == data && !seen[i] {
 					extra_require(t, !seen[i])
 					extra_require(t, event.res == results[i])
 					seen[i] = true
@@ -582,7 +576,7 @@ extra_one :: proc(t: ^testing.T, s: ^Test_IO, data: rifle.IOUserData, result: i3
 extra_write :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, index: u16, buffer: []u8, offset: u64) {
 	data := rifle.IOUserData {
 		op         = .WRITE,
-		file_index = index,
+		page_index = u32(index),
 		payload    = 101,
 	}
 	extra_require(t, s.io.write_at(s.io.data, data, buffer, offset, file) == nil)
@@ -594,7 +588,7 @@ extra_read :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, index: u16
 	for &b in buffer {b = 255}
 	data := rifle.IOUserData {
 		op         = .READ,
-		file_index = index,
+		page_index = u32(index),
 		payload    = 102,
 	}
 	extra_require(t, s.io.read_at(s.io.data, data, buffer, offset, file) == nil)
@@ -696,7 +690,6 @@ uring_extra_batched_reads :: proc(t: ^testing.T) {
 		// Reverse disk order and use separate registered destinations.
 		expected[i] = rifle.IOUserData {
 			op         = .READ,
-			file_index = 7,
 			page_index = u32(7 - i),
 			payload    = u32(200 + i),
 		}
@@ -729,7 +722,7 @@ uring_extra_file_isolation :: proc(t: ^testing.T) {
 		extra_pattern(src, i + 30)
 		expected[i] = rifle.IOUserData {
 			op         = .WRITE,
-			file_index = indices[i],
+			page_index = u32(indices[i]),
 			payload    = u32(300 + i),
 		}
 		extra_require(t, s.io.write_at(s.io.data, expected[i], src, 2 * PAGE_SIZE, files[i]) == nil)
@@ -751,7 +744,7 @@ uring_extra_slot_reuse :: proc(t: ^testing.T) {
 	extra_require(t, err == nil)
 	paths := [2]cstring{"/tmp/rifle_extra_reuse_a.rfl", "/tmp/rifle_extra_reuse_b.rfl"}
 	for path in paths {track_file(s, string(path))}
-	// More distinct file identities than available slots; cache indices stay
+	// More distinct file identities than available slots; page indices stay
 	// within capacity, but change as a registered slot is recycled.
 	for round in 0 ..< 8 {
 		file := rifle.RifleFile{id = i64(400 + round), path = paths[round % 2]}
@@ -777,7 +770,7 @@ uring_extra_one_completion_at_a_time :: proc(t: ^testing.T) {
 		extra_pattern(src, i + 50)
 		expected[i] = rifle.IOUserData {
 			op         = .WRITE,
-			file_index = 7,
+			page_index = u32(7),
 			payload    = u32(500 + i),
 		}
 		extra_require(t, s.io.write_at(s.io.data, expected[i], src, u64(i * PAGE_SIZE), file) == nil)
@@ -793,7 +786,7 @@ uring_extra_one_completion_at_a_time :: proc(t: ^testing.T) {
 		extra_require(t, event.res == PAGE_SIZE)
 		found := false
 		for data, i in expected {
-			if event.user_data == data {
+			if event.user_data == data && !seen[i] {
 				extra_require(t, !seen[i])
 				seen[i] = true
 				found = true
@@ -816,12 +809,12 @@ uring_extra_sync_before_write_reap :: proc(t: ^testing.T) {
 	extra_pattern(s.buffer[:PAGE_SIZE], 60)
 	write_data := rifle.IOUserData {
 		op         = .WRITE,
-		file_index = 7,
+		page_index = u32(7),
 		payload    = 600,
 	}
 	sync_data := rifle.IOUserData {
 		op         = .SYNC,
-		file_index = 7,
+		page_index = u32(7),
 		payload    = 601,
 	}
 	extra_require(t, s.io.write_at(s.io.data, write_data, s.buffer[:PAGE_SIZE], 0, file) == nil)
@@ -871,13 +864,7 @@ uring_extra_sync_multiple_dirty_files :: proc(t: ^testing.T) {
 			payload    = u32(700 + generation),
 		}
 		extra_require(t, s.io.sync(s.io.data, data) == nil)
-		// Contract assumed here: sync emits one completion per dirty file,
-		// restoring each file's cache index and retaining the request token.
-		expected := [2]rifle.IOUserData{data, data}
-		expected[0].file_index = indices[0]
-		expected[1].file_index = indices[1]
-		results := [2]i32{0, 0}
-		extra_collect(t, s, expected[:], results[:])
+		extra_one(t, s, data, 0)
 	}
 	for i in 0 ..< 2 {close_file(t, s, files[i], indices[i])}
 }
@@ -893,7 +880,6 @@ uring_extra_delete_preserves_request_token :: proc(t: ^testing.T) {
 	// DELETE uses a path, not a registered slot. Its token is opaque.
 	data := rifle.IOUserData {
 		op         = .DELETE,
-		file_index = 73,
 		page_index = 0xffffff,
 		payload    = 0xffffff,
 	}

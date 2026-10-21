@@ -11,8 +11,8 @@ fake_io_delayed_transfers :: proc(t: ^testing.T) {
 	buffer := [8]u8{1, 2, 3, 4, 9, 9, 9, 9}
 	testing.expect(t, io.init(io.data, buffer[:]) == nil)
 	file := rifle.RifleFile{id = 42}
-	write := rifle.IOUserData{op = .WRITE, file_index = 7, payload = 1}
-	read := rifle.IOUserData{op = .READ, file_index = 7, payload = 2}
+	write := rifle.IOUserData{op = .WRITE, page_index = u32(7), payload = 1}
+	read := rifle.IOUserData{op = .READ, page_index = u32(7), payload = 2}
 	testing.expect(t, io.write_at(io.data, write, buffer[:4], 16, file) == nil)
 	testing.expect(t, io.read_at(io.data, read, buffer[4:], 32, file) == nil)
 	testing.expect(t, len(f.requests) == 2 && f.requests[0].offset == 16 && f.requests[1].file.id == 42)
@@ -51,8 +51,8 @@ fake_io_errors_and_batches :: proc(t: ^testing.T) {
 	testing.expect(t, n == 1 && err == nil && out[0].res == -5)
 	testing.expect(t, io.sync(io.data, {payload = 9}) == nil)
 	events := [2]rifle.IOCompletion{
-		{user_data = {op = .SYNC, file_index = 1, payload = 9}},
-		{user_data = {op = .SYNC, file_index = 2, payload = 9}},
+		{user_data = {op = .SYNC, page_index = u32(1), payload = 9}},
+		{user_data = {op = .SYNC, page_index = u32(2), payload = 9}},
 	}
 	fake_io_complete(&f, 0, 0, events = events[:])
 	n, err = io.poll(io.data, out[:])

@@ -20,7 +20,7 @@ IOCompletion :: struct {
 
 IOUserData :: bit_field u64 {
 	page_index: u32         | 24,
-	file_index: u16         | 12,
+	reserved:   u16         | 12, // Used internally by I/O.
 	op:         IOOperation | 4,
 	payload:    u32         | 24,
 }
@@ -33,4 +33,9 @@ IOOperation :: enum u8 {
 	WRITE,
 	SYNC,
 	DELETE,
+}
+
+RifleFile :: struct {
+	id:   i64,
+	path: cstring,
 }

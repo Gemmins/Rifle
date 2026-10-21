@@ -57,6 +57,7 @@ RifleError :: enum {
 	InvalidArgError,
 	FileOperationError,
 	GenericError,
+	FileNotReady,
 }
 
 // Lifecycle
