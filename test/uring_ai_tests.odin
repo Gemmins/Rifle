@@ -13,7 +13,7 @@ PAGE_SIZE :: 4096
 BUFFER_SIZE :: 16 * PAGE_SIZE
 
 Test_IO :: struct {
-	io:            rifle.IO,
+	io:            ^rifle.IO.State,
 	buffer:        []u8,
 	completions:   [128]rifle.IOCompletion,
 	paths:         [8]string,
@@ -25,11 +25,11 @@ Test_IO :: struct {
 cleanup_test_io :: proc(ctx: rawptr) {
 	s := cast(^Test_IO)ctx
 
-	if s.io.data != nil {
+	if s.io != nil {
 		if s.initialized {
-			_ = s.io.deinit(s.io.data)
+			_ = rifle.IO.deinit(s.io)
 		} else if !s.deinitialized {
-			free(s.io.data)
+			free(s.io)
 		}
 	}
 
@@ -59,7 +59,7 @@ new_test_io :: proc(t: ^testing.T) -> ^Test_IO {
 	config := rifle.UringConfig{uring.DEFAULT_PARAMS, 128, 1 << 20}
 	s.io = rifle.new_uring_io(config, linux.AT_FDCWD)
 
-	if !testing.expect(t, s.io.data != nil) {
+	if !testing.expect(t, s.io != nil) {
 		testing.fail_now(t)
 	}
 
@@ -69,7 +69,7 @@ new_test_io :: proc(t: ^testing.T) -> ^Test_IO {
 setup_test_io :: proc(t: ^testing.T) -> ^Test_IO {
 	s := new_test_io(t)
 
-	err := s.io.init(s.io.data, s.buffer)
+	err := rifle.IO.init(s.io, s.buffer)
 	if !testing.expect(t, err == nil) {
 		testing.fail_now(t)
 	}
@@ -89,7 +89,7 @@ poll_events :: proc(t: ^testing.T, s: ^Test_IO, expected: int) -> []rifle.IOComp
 	count := 0
 
 	for count < expected {
-		n, err := s.io.poll(s.io.data, s.completions[count:expected])
+		n, err := rifle.IO.poll(s.io, s.completions[count:expected])
 
 		if !testing.expect(t, err == nil) {
 			testing.fail_now(t)
@@ -131,7 +131,7 @@ open_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, page_index:
 		page_index = u32(page_index),
 	}
 
-	err := s.io.open(s.io.data, data, file)
+	err := rifle.IO.open(s.io, data, file)
 	if !testing.expect(t, err == nil) {
 		testing.fail_now(t)
 	}
@@ -143,13 +143,13 @@ open_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, page_index:
 
 close_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, page_index: u16) {
 	// Test cleanup follows the same flush-before-close contract as callers.
-	uio := cast(^rifle.UringIO)s.io.data
+	uio := s.io
 	dirty_count := 0
 	for _, slot in uio.file_index.file_map {
 		if uio.file_index.slots[slot].state == .Dirty {dirty_count += 1}
 	}
 	if dirty_count > 0 {
-		extra_require(t, s.io.sync(s.io.data, {op = .SYNC}) == nil)
+		extra_require(t, rifle.IO.sync(s.io, {op = .SYNC}) == nil)
 		for event in poll_events(t, s, 1) {
 			extra_require(t, event.user_data.op == .SYNC && event.res == 0)
 		}
@@ -159,7 +159,7 @@ close_file :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, page_index
 		page_index = u32(page_index),
 	}
 
-	err := s.io.close(s.io.data, data, file)
+	err := rifle.IO.close(s.io, data, file)
 	if !testing.expect(t, err == nil) {
 		testing.fail_now(t)
 	}
@@ -175,16 +175,16 @@ new_uring :: proc(t: ^testing.T) {
 
 	io := rifle.new_uring_io(config, linux.AT_FDCWD)
 
-	testing.expect(t, io.data != nil)
+	testing.expect(t, io != nil)
 
-	free(io.data)
+	free(io)
 }
 
 @(test)
 uring_init :: proc(t: ^testing.T) {
 	s := new_test_io(t)
 
-	err := s.io.init(s.io.data, s.buffer)
+	err := rifle.IO.init(s.io, s.buffer)
 
 	testing.expect(t, err == nil)
 	s.initialized = err == nil
@@ -193,10 +193,10 @@ uring_init :: proc(t: ^testing.T) {
 @(test)
 uring_deinit :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
-	uio := cast(^rifle.UringIO)s.io.data
+	uio := s.io
 	fd := uio.ring.fd
 
-	err := s.io.deinit(s.io.data)
+	err := rifle.IO.deinit(s.io)
 	s.initialized = false
 	s.deinitialized = true
 
@@ -219,7 +219,7 @@ open_close_file :: proc(t: ^testing.T) {
 		payload    = 456,
 	}
 
-	err := s.io.open(s.io.data, data, file)
+	err := rifle.IO.open(s.io, data, file)
 	testing.expect(t, err == nil)
 
 	events := poll_events(t, s, 1)
@@ -229,7 +229,7 @@ open_close_file :: proc(t: ^testing.T) {
 
 	data.op = .CLOSE
 
-	err = s.io.close(s.io.data, data, file)
+	err = rifle.IO.close(s.io, data, file)
 	testing.expect(t, err == nil)
 
 	events = poll_events(t, s, 1)
@@ -276,7 +276,7 @@ write_read_file :: proc(t: ^testing.T) {
 		payload    = 42,
 	}
 
-	err := s.io.write_at(s.io.data, data, write_buffer, 0, file)
+	err := rifle.IO.write_at(s.io, data, write_buffer, 0, file)
 	testing.expect(t, err == nil)
 
 	events := poll_events(t, s, 1)
@@ -286,7 +286,7 @@ write_read_file :: proc(t: ^testing.T) {
 	data.op = .READ
 	data.payload = 43
 
-	err = s.io.read_at(s.io.data, data, read_buffer, 0, file)
+	err = rifle.IO.read_at(s.io, data, read_buffer, 0, file)
 	testing.expect(t, err == nil)
 
 	events = poll_events(t, s, 1)
@@ -330,10 +330,10 @@ write_at_offsets :: proc(t: ^testing.T) {
 		payload    = 2,
 	}
 
-	err := s.io.write_at(s.io.data, data_a, first, 0, file)
+	err := rifle.IO.write_at(s.io, data_a, first, 0, file)
 	testing.expect(t, err == nil)
 
-	err = s.io.write_at(s.io.data, data_b, second, 4 * PAGE_SIZE, file)
+	err = rifle.IO.write_at(s.io, data_b, second, 4 * PAGE_SIZE, file)
 	testing.expect(t, err == nil)
 
 	events := poll_events(t, s, 2)
@@ -349,7 +349,7 @@ write_at_offsets :: proc(t: ^testing.T) {
 		payload    = 3,
 	}
 
-	err = s.io.read_at(s.io.data, read_data, read_buffer, 4 * PAGE_SIZE, file)
+	err = rifle.IO.read_at(s.io, read_data, read_buffer, 4 * PAGE_SIZE, file)
 	testing.expect(t, err == nil)
 
 	events = poll_events(t, s, 1)
@@ -363,7 +363,7 @@ write_at_offsets :: proc(t: ^testing.T) {
 	read_data.page_index = 10
 	read_data.payload = 4
 
-	err = s.io.read_at(s.io.data, read_data, read_buffer, 0, file)
+	err = rifle.IO.read_at(s.io, read_data, read_buffer, 0, file)
 	testing.expect(t, err == nil)
 
 	events = poll_events(t, s, 1)
@@ -403,7 +403,7 @@ batched_writes :: proc(t: ^testing.T) {
 
 		expected[i] = data
 
-		err := s.io.write_at(s.io.data, data, buffer, u64(i * PAGE_SIZE), file)
+		err := rifle.IO.write_at(s.io, data, buffer, u64(i * PAGE_SIZE), file)
 		testing.expect(t, err == nil)
 	}
 
@@ -457,10 +457,10 @@ multiple_files :: proc(t: ^testing.T) {
 		payload    = 20,
 	}
 
-	err := s.io.open(s.io.data, data_a, file_a)
+	err := rifle.IO.open(s.io, data_a, file_a)
 	testing.expect(t, err == nil)
 
-	err = s.io.open(s.io.data, data_b, file_b)
+	err = rifle.IO.open(s.io, data_b, file_b)
 	testing.expect(t, err == nil)
 
 	events := poll_events(t, s, 2)
@@ -476,10 +476,10 @@ multiple_files :: proc(t: ^testing.T) {
 	data_a.op = .CLOSE
 	data_b.op = .CLOSE
 
-	err = s.io.close(s.io.data, data_a, file_a)
+	err = rifle.IO.close(s.io, data_a, file_a)
 	testing.expect(t, err == nil)
 
-	err = s.io.close(s.io.data, data_b, file_b)
+	err = rifle.IO.close(s.io, data_b, file_b)
 	testing.expect(t, err == nil)
 
 	events = poll_events(t, s, 2)
@@ -510,7 +510,7 @@ open_delete_file :: proc(t: ^testing.T) {
 		payload = 123,
 	}
 
-	err := s.io.delete(s.io.data, data, file)
+	err := rifle.IO.delete(s.io, data, file)
 	testing.expect(t, err == nil)
 
 	events := poll_events(t, s, 1)
@@ -547,7 +547,7 @@ extra_collect :: proc(t: ^testing.T, s: ^Test_IO, expected: []rifle.IOUserData, 
 	seen: [128]bool
 	count := 0
 	for count < len(expected) {
-		n, err := s.io.poll(s.io.data, s.completions[:])
+		n, err := rifle.IO.poll(s.io, s.completions[:])
 		extra_require(t, err == nil)
 		extra_require(t, int(n) <= len(s.completions))
 		for event in s.completions[:int(n)] {
@@ -579,7 +579,7 @@ extra_write :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, index: u1
 		page_index = u32(index),
 		payload    = 101,
 	}
-	extra_require(t, s.io.write_at(s.io.data, data, buffer, offset, file) == nil)
+	extra_require(t, rifle.IO.write_at(s.io, data, buffer, offset, file) == nil)
 	extra_one(t, s, data, i32(len(buffer)))
 }
 
@@ -591,7 +591,7 @@ extra_read :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, index: u16
 		page_index = u32(index),
 		payload    = 102,
 	}
-	extra_require(t, s.io.read_at(s.io.data, data, buffer, offset, file) == nil)
+	extra_require(t, rifle.IO.read_at(s.io, data, buffer, offset, file) == nil)
 	extra_one(t, s, data, i32(len(buffer)))
 	extra_expect_pattern(t, buffer, seed)
 }
@@ -600,7 +600,7 @@ extra_read :: proc(t: ^testing.T, s: ^Test_IO, file: rifle.RifleFile, index: u16
 uring_extra_idle_poll :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
 	for _ in 0 ..< 32 {
-		n, err := s.io.poll(s.io.data, s.completions[:])
+		n, err := rifle.IO.poll(s.io, s.completions[:])
 		extra_require(t, err == nil)
 		testing.expect_value(t, n, u32(0))
 	}
@@ -696,7 +696,7 @@ uring_extra_batched_reads :: proc(t: ^testing.T) {
 		results[i] = PAGE_SIZE
 		dst := s.buffer[i * PAGE_SIZE:(i + 1) * PAGE_SIZE]
 		for &b in dst {b = 255}
-		extra_require(t, s.io.read_at(s.io.data, expected[i], dst, u64((7 - i) * PAGE_SIZE), file) == nil)
+		extra_require(t, rifle.IO.read_at(s.io, expected[i], dst, u64((7 - i) * PAGE_SIZE), file) == nil)
 	}
 	extra_collect(t, s, expected[:], results[:])
 	for i in 0 ..< 8 {
@@ -725,7 +725,7 @@ uring_extra_file_isolation :: proc(t: ^testing.T) {
 			page_index = u32(indices[i]),
 			payload    = u32(300 + i),
 		}
-		extra_require(t, s.io.write_at(s.io.data, expected[i], src, 2 * PAGE_SIZE, files[i]) == nil)
+		extra_require(t, rifle.IO.write_at(s.io, expected[i], src, 2 * PAGE_SIZE, files[i]) == nil)
 	}
 	extra_collect(t, s, expected[:], results[:])
 	for i in 0 ..< 2 {
@@ -737,9 +737,9 @@ uring_extra_file_isolation :: proc(t: ^testing.T) {
 @(test)
 uring_extra_slot_reuse :: proc(t: ^testing.T) {
 	s := new_test_io(t)
-	uio := cast(^rifle.UringIO)s.io.data
+	uio := s.io
 	uio.config.num_files = 2
-	err := s.io.init(s.io.data, s.buffer)
+	err := rifle.IO.init(s.io, s.buffer)
 	s.initialized = err == nil
 	extra_require(t, err == nil)
 	paths := [2]cstring{"/tmp/rifle_extra_reuse_a.rfl", "/tmp/rifle_extra_reuse_b.rfl"}
@@ -773,12 +773,12 @@ uring_extra_one_completion_at_a_time :: proc(t: ^testing.T) {
 			page_index = u32(7),
 			payload    = u32(500 + i),
 		}
-		extra_require(t, s.io.write_at(s.io.data, expected[i], src, u64(i * PAGE_SIZE), file) == nil)
+		extra_require(t, rifle.IO.write_at(s.io, expected[i], src, u64(i * PAGE_SIZE), file) == nil)
 	}
 	seen: [8]bool
 	count := 0
 	for count < 8 {
-		n, err := s.io.poll(s.io.data, s.completions[:1])
+		n, err := rifle.IO.poll(s.io, s.completions[:1])
 		extra_require(t, err == nil)
 		extra_require(t, n <= 1)
 		if n == 0 {continue}
@@ -817,12 +817,12 @@ uring_extra_sync_before_write_reap :: proc(t: ^testing.T) {
 		page_index = u32(7),
 		payload    = 601,
 	}
-	extra_require(t, s.io.write_at(s.io.data, write_data, s.buffer[:PAGE_SIZE], 0, file) == nil)
-	extra_require(t, s.io.sync(s.io.data, sync_data) == nil)
+	extra_require(t, rifle.IO.write_at(s.io, write_data, s.buffer[:PAGE_SIZE], 0, file) == nil)
+	extra_require(t, rifle.IO.sync(s.io, sync_data) == nil)
 	// Assert write-before-sync delivery even across different poll calls.
 	write_seen, sync_seen := false, false
 	for !sync_seen {
-		n, err := s.io.poll(s.io.data, s.completions[:])
+		n, err := rifle.IO.poll(s.io, s.completions[:])
 		extra_require(t, err == nil)
 		for event in s.completions[:int(n)] {
 			if event.user_data == write_data {
@@ -863,7 +863,7 @@ uring_extra_sync_multiple_dirty_files :: proc(t: ^testing.T) {
 			page_index = 123,
 			payload    = u32(700 + generation),
 		}
-		extra_require(t, s.io.sync(s.io.data, data) == nil)
+		extra_require(t, rifle.IO.sync(s.io, data) == nil)
 		extra_one(t, s, data, 0)
 	}
 	for i in 0 ..< 2 {close_file(t, s, files[i], indices[i])}
@@ -883,7 +883,7 @@ uring_extra_delete_preserves_request_token :: proc(t: ^testing.T) {
 		page_index = 0xffffff,
 		payload    = 0xffffff,
 	}
-	extra_require(t, s.io.delete(s.io.data, data, file) == nil)
+	extra_require(t, rifle.IO.delete(s.io, data, file) == nil)
 	extra_one(t, s, data, 0)
 	testing.expect(t, !os.exists(path))
 }

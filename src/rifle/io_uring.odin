@@ -1,3 +1,5 @@
+#+build linux
+
 package rifle
 
 import "core:sys/linux"
@@ -145,13 +147,11 @@ link_timeout :: proc(
 	return sqe, nil
 }
 
-new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> IO {
+new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> ^UringIO {
 	uring_io := new(UringIO, context.allocator)
 	uring_io.config = config
 	uring_io.dirfd = dirfd
-	io := IO{rawptr(uring_io), uring_init, uring_deinit, uring_open, uring_close, uring_readat, uring_writeat, uring_sync, uring_delete, uring_poll}
-
-	return io
+	return uring_io
 }
 
 uring_init :: proc(ctx: rawptr, cache_buffer: []u8) -> RifleError {

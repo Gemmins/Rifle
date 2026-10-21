@@ -125,7 +125,7 @@ cache_write_waits_for_flush :: proc(t: ^testing.T) {
 	backing: [16]u8
 	pages := [4]rifle.Page{{data = backing[:], index = 0, state = .Flushing, written_bytes = 4}, {index = -1}, {index = -1}, {index = -1}}
 	sets := [1]rifle.Set(rifle.SET_ASSOC){{pages = pages[:], lru = rifle.lru_new()}}
-	pc := rifle.PageCache {
+	pc := AI_Flush_Wait_Cache {
 		page_size   = 16,
 		num_pages   = 4,
 		record_size = 4,
@@ -133,28 +133,11 @@ cache_write_waits_for_flush :: proc(t: ^testing.T) {
 	}
 	path_storage: [512]u8
 	ai_cache_paths(&pc, path_storage[:])
-	Poll_State :: struct {
-		t:     ^testing.T,
-		cache: ^rifle.PageCache,
-		calls: int,
-	}
-	state := Poll_State {
+	state := AI_Flush_Wait_State {
 		t     = t,
-		cache = &pc,
+		sets = pc.sets,
 	}
-	pc.io.data = &state
-	pc.io.poll = proc(ctx: rawptr, completions: []rifle.IOCompletion) -> (u32, rifle.RifleError) {
-		s := cast(^Poll_State)ctx
-		set := &s.cache.sets[0]
-		p := &set.pages[0]
-		testing.expect_value(s.t, set.lock, u32(0))
-		testing.expect_value(s.t, p.ref_count, i64(1))
-		testing.expect_value(s.t, p.written_bytes, i64(4))
-		testing.expect_value(s.t, p.data[4], u8(0))
-		s.calls += 1
-		if s.calls == 2 {p.state = .Clean}
-		return 0, nil
-	}
+	pc.io_state = &state
 	data := [4]u8{1, 2, 3, 4}
 	rifle.cache_write(&pc, data[:], 1, 1)
 	testing.expect_value(t, state.calls, 2)
@@ -209,41 +192,12 @@ cache_read_waits_for_loading :: proc(t: ^testing.T) {
 	pages: [4]rifle.Page
 	for &p, i in pages {p = {data = backing[i * 16:(i + 1) * 16], index = -1}}
 	sets := [1]rifle.Set(rifle.SET_ASSOC){{pages = pages[:], lru = rifle.lru_new()}}
-	pc := rifle.PageCache{page_size = 16, num_pages = 4, record_size = 4, sets = sets[:]}
+	pc := AI_Read_Wait_Cache{page_size = 16, num_pages = 4, record_size = 4, sets = sets[:]}
 	path_storage: [512]u8
 	ai_cache_paths(&pc, path_storage[:])
 	output := [4]u8{0xee, 0xee, 0xee, 0xee}
-	Poll_State :: struct {t: ^testing.T, cache: ^rifle.PageCache, output: []u8, calls: int}
-	state := Poll_State{t = t, cache = &pc, output = output[:]}
-	pc.io.data = &state
-	pc.io.read_at = proc(ctx: rawptr, data: rifle.IOUserData, buffer: []u8, offset: u64, file: rifle.RifleFile) -> rifle.RifleError {
-		s := cast(^Poll_State)ctx
-		testing.expect_value(s.t, s.cache.sets[0].lock, u32(1))
-		return nil
-	}
-	// Simulate the delayed completion.
-	pc.io.poll = proc(ctx: rawptr, completions: []rifle.IOCompletion) -> (u32, rifle.RifleError) {
-		s := cast(^Poll_State)ctx
-		set := &s.cache.sets[0]
-		testing.expect_value(s.t, set.lock, u32(0))
-		for b in s.output {testing.expect_value(s.t, b, u8(0xee))}
-		s.calls += 1
-		testing.expect(s.t, s.calls <= 2)
-		for &p in set.pages {
-			if p.index != 0 {continue}
-			testing.expect_value(s.t, p.ref_count, i64(1))
-			if s.calls == 1 {
-				testing.expect_value(s.t, p.state, rifle.PageState.Loading)
-				p.state = .Loading
-			} else {
-				testing.expect_value(s.t, p.state, rifle.PageState.Loading)
-				for &b, i in p.data {b = u8(i)}
-				p.written_bytes = 16
-				p.state = .Clean
-			}
-		}
-		return 0, nil
-	}
+	state := AI_Read_Wait_State{t = t, sets = pc.sets, output = output[:]}
+	pc.io_state = &state
 	rifle.cache_read(&pc, output[:], 1, 1)
 	testing.expect_value(t, state.calls, 2)
 	for b, i in output {testing.expect_value(t, b, u8(i + 4))}
@@ -254,8 +208,16 @@ cache_read_waits_for_loading :: proc(t: ^testing.T) {
 	testing.expect_value(t, sets[0].lock, u32(0))
 }
 
+ai_unexpected_transfer :: proc(ctx: rawptr, data: rifle.IOUserData, buffer: []u8, offset: u64, file: rifle.RifleFile) -> rifle.RifleError {
+	panic("unexpected I/O transfer in cache wait test")
+}
+
+ai_unexpected_sync :: proc(ctx: rawptr, data: rifle.IOUserData) -> rifle.RifleError {
+	panic("unexpected sync in cache wait test")
+}
+
 // Storage for tests which construct page sets directly.
-ai_cache_paths :: proc(c: ^rifle.PageCache, storage: []u8) {
+ai_cache_paths :: proc(c: ^$Cache/rifle.PageCache_Impl, storage: []u8) {
 	c.pages_per_file = 4
 	i := 0
 	for &set in c.sets {
@@ -269,7 +231,7 @@ ai_cache_paths :: proc(c: ^rifle.PageCache, storage: []u8) {
 @(test)
 cache_page_file_paths :: proc(t: ^testing.T) {
 	f: Fake_IO
-	pc: rifle.PageCache
+	pc: Fake_PageCache
 	durable_index: i64
 	extra_require(t, rifle.cache_init(&pc, 64, 16, fake_io(&f), "/tmp/rifle/", 32, &durable_index) == nil)
 	defer rifle.cache_delete(&pc)
@@ -315,7 +277,7 @@ cache_poll_releases_completion_locks :: proc(t: ^testing.T) {
 	for res in results {
 		f: Fake_IO
 		io := fake_io(&f)
-		defer io.deinit(io.data)
+		defer Fake_IO_Interface.deinit(io)
 		pages: [8]rifle.Page
 		sets: [2]rifle.Set(rifle.SET_ASSOC)
 		for &set, i in sets {set.pages = pages[i * 4:(i + 1) * 4]}
@@ -325,7 +287,7 @@ cache_poll_releases_completion_locks :: proc(t: ^testing.T) {
 		append(&f.completions,
 			rifle.IOCompletion{user_data = {op = .READ, page_index = 4}, res = res},
 			rifle.IOCompletion{user_data = {op = .WRITE, page_index = 5}, res = res})
-		pc := rifle.PageCache{page_size = 16, pages = pages[:], sets = sets[:], io = io, io_completions = completions[:]}
+		pc := Fake_PageCache{page_size = 16, pages = pages[:], sets = sets[:], io_state = io, io_completions = completions[:]}
 		polled, err := rifle.cache_poll(&pc)
 		testing.expect(t, polled && err == nil && pc.polling == 0)
 		testing.expect(t, pages[4].state == (res == 16 ? .Clean : .Read_Pending))
@@ -339,10 +301,10 @@ cache_poll_releases_completion_locks :: proc(t: ^testing.T) {
 cache_sync_updates_durable_index :: proc(t: ^testing.T) {
 	f: Fake_IO
 	io := fake_io(&f)
-	defer io.deinit(io.data)
+	defer Fake_IO_Interface.deinit(io)
 	completions: [1]rifle.IOCompletion
 	durable_index: i64 = -1
-	pc := rifle.PageCache{io = io, io_completions = completions[:], durable_index = &durable_index}
+	pc := Fake_PageCache{io_state = io, io_completions = completions[:], durable_index = &durable_index}
 	rifle.cache_sync(&pc, 0)
 	rifle.cache_poll(&pc)
 	testing.expect(t, pc.sync_in_progress && len(f.requests) == 1)
@@ -363,4 +325,63 @@ cache_sync_updates_durable_index :: proc(t: ^testing.T) {
 	fake_io_complete(&f, 0, -1)
 	rifle.cache_poll(&pc)
 	testing.expect(t, durable_index == 100 && !pc.sync_in_progress)
+}
+
+
+AI_Flush_Wait_IO :: rifle.IO_Impl(AI_Flush_Wait_State, nil, nil, nil, nil, ai_unexpected_transfer, ai_unexpected_transfer, ai_unexpected_sync, nil, AI_Flush_Wait_poll)
+
+AI_Flush_Wait_Cache :: rifle.PageCache_Impl(AI_Flush_Wait_IO)
+
+AI_Flush_Wait_State :: struct {
+	t:     ^testing.T,
+	sets: []rifle.Set(rifle.SET_ASSOC),
+	calls: int,
+}
+
+AI_Flush_Wait_poll :: proc(ctx: rawptr, completions: []rifle.IOCompletion) -> (u32, rifle.RifleError) {
+	s := cast(^AI_Flush_Wait_State)ctx
+	set := &s.sets[0]
+	p := &set.pages[0]
+	testing.expect_value(s.t, set.lock, u32(0))
+	testing.expect_value(s.t, p.ref_count, i64(1))
+	testing.expect_value(s.t, p.written_bytes, i64(4))
+	testing.expect_value(s.t, p.data[4], u8(0))
+	s.calls += 1
+	if s.calls == 2 {p.state = .Clean}
+	return 0, nil
+}
+
+AI_Read_Wait_IO :: rifle.IO_Impl(AI_Read_Wait_State, nil, nil, nil, nil, AI_Read_Wait_read, ai_unexpected_transfer, ai_unexpected_sync, nil, AI_Read_Wait_poll)
+
+AI_Read_Wait_Cache :: rifle.PageCache_Impl(AI_Read_Wait_IO)
+
+AI_Read_Wait_State :: struct {t: ^testing.T, sets: []rifle.Set(rifle.SET_ASSOC), output: []u8, calls: int}
+
+AI_Read_Wait_poll :: proc(ctx: rawptr, completions: []rifle.IOCompletion) -> (u32, rifle.RifleError) {
+	s := cast(^AI_Read_Wait_State)ctx
+	set := &s.sets[0]
+	testing.expect_value(s.t, set.lock, u32(0))
+	for b in s.output {testing.expect_value(s.t, b, u8(0xee))}
+	s.calls += 1
+	testing.expect(s.t, s.calls <= 2)
+	for &p in set.pages {
+		if p.index != 0 {continue}
+		testing.expect_value(s.t, p.ref_count, i64(1))
+		if s.calls == 1 {
+			testing.expect_value(s.t, p.state, rifle.PageState.Loading)
+			p.state = .Loading
+		} else {
+			testing.expect_value(s.t, p.state, rifle.PageState.Loading)
+			for &b, i in p.data {b = u8(i)}
+			p.written_bytes = 16
+			p.state = .Clean
+		}
+	}
+	return 0, nil
+}
+
+AI_Read_Wait_read :: proc(ctx: rawptr, data: rifle.IOUserData, buffer: []u8, offset: u64, file: rifle.RifleFile) -> rifle.RifleError {
+	s := cast(^AI_Read_Wait_State)ctx
+	testing.expect_value(s.t, s.sets[0].lock, u32(1))
+	return nil
 }

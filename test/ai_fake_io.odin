@@ -19,19 +19,11 @@ Fake_IO_Request :: struct {
 	offset:    u64,
 }
 
-fake_io :: proc(f: ^Fake_IO) -> rifle.IO {
-	return {
-		data = f,
-		init = fake_io_init,
-		deinit = fake_io_deinit,
-		open = fake_io_open,
-		close = fake_io_close,
-		read_at = fake_io_read,
-		write_at = fake_io_write,
-		sync = fake_io_sync,
-		delete = fake_io_delete,
-		poll = fake_io_poll,
-	}
+Fake_IO_Interface :: rifle.IO_Impl(Fake_IO, fake_io_init, fake_io_deinit, fake_io_open, fake_io_close, fake_io_read, fake_io_write, fake_io_sync, fake_io_delete, fake_io_poll)
+Fake_PageCache :: rifle.PageCache_Impl(Fake_IO_Interface)
+
+fake_io :: proc(f: ^Fake_IO) -> ^Fake_IO {
+	return f
 }
 
 fake_io_init :: proc(ctx: rawptr, buffer: []u8) -> rifle.RifleError {

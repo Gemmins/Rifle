@@ -12,7 +12,9 @@ SET_ASSOC :: 4 // LRU impl requires 4
 
 //TODO: divide page pinning into sections as to not lock up all/many pages on read/write
 
-PageCache :: struct {
+PageCache :: PageCache_Impl(IO)
+
+PageCache_Impl :: struct($IO: typeid) {
 	page_size:      i64,
 	num_pages:      i64,
 	pages:          []Page,
@@ -21,7 +23,7 @@ PageCache :: struct {
 	pages_per_file: i64,
 	path_storage:   []u8,
 	base_path:      string,
-	io:             IO,
+	io_state:       ^IO.State,
 	io_completions: []IOCompletion,
 	record_size:    i64,
 	polling:        u32,
@@ -58,7 +60,7 @@ Set :: struct($Assoc: i64) {
 	lru:   lru,
 }
 
-cache_init :: proc(c: ^PageCache, capacity_in_bytes: i64, page_size: i64 = 1 << 13, io: IO, base_path: string, file_size: i64, durable_index: ^i64) -> runtime.Allocator_Error {
+cache_init :: proc(c: ^$Cache/PageCache_Impl, capacity_in_bytes: i64, page_size: i64 = 1 << 13, io_state: ^$IOState, base_path: string, file_size: i64, durable_index: ^i64) -> runtime.Allocator_Error {
 	{
 		assert(file_size > 0 && page_size > 0 && file_size % page_size == 0)
 		assert(durable_index != nil)
@@ -90,14 +92,14 @@ cache_init :: proc(c: ^PageCache, capacity_in_bytes: i64, page_size: i64 = 1 << 
 	}
 
 	c.io_completions = make([]IOCompletion, 128, context.allocator) //TODO: actual count
-	c.io = io
-	c.io.init(c.io.data, c.pageData)
+	c.io_state = io_state
+	Cache.IO.init(c.io_state, c.pageData)
 
 	return nil
 }
 
-cache_delete :: proc(c: ^PageCache) {
-	_ = c.io.deinit(c.io.data)
+cache_delete :: proc(c: ^$Cache/PageCache_Impl) {
+	_ = Cache.IO.deinit(c.io_state)
 	_ = delete(c.pageData)
 	_ = delete(c.sets)
 	_ = delete(c.path_storage)
@@ -106,7 +108,7 @@ cache_delete :: proc(c: ^PageCache) {
 }
 
 // Inclusive page bounds - empty range returns (0, -1).
-cache_page_range :: proc(c: ^PageCache, start, count: i64) -> (min_page, max_page: i64) {
+cache_page_range :: proc(c: ^$Cache/PageCache_Impl, start, count: i64) -> (min_page, max_page: i64) {
 	{
 		assert(start >= 0 && count >= 0)
 		assert(c.record_size > 0)
@@ -125,7 +127,7 @@ cache_page_range :: proc(c: ^PageCache, start, count: i64) -> (min_page, max_pag
 }
 
 //Write a number of contiguous records
-cache_write :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
+cache_write :: proc(c: ^$Cache/PageCache_Impl, data: []u8, start: i64, count: i64) {
 	start_page, end_page := cache_page_range(c, start, count)
 	cache_pin_pages(c, start_page, end_page, .Clean)
 
@@ -180,7 +182,7 @@ cache_write :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
 }
 
 //Read a number of contiguous records
-cache_read :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
+cache_read :: proc(c: ^$Cache/PageCache_Impl, data: []u8, start: i64, count: i64) {
 	start_page, end_page := cache_page_range(c, start, count)
 	cache_pin_pages(c, start_page, end_page, .Read_Pending)
 
@@ -227,7 +229,7 @@ cache_read :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
 }
 
 //Issue io and handle io completions
-cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
+cache_poll :: proc(c: ^$Cache/PageCache_Impl) -> (bool, RifleError) {
 	// If another thread in polling, return
 	if _, ok := sync.atomic_compare_exchange_strong(&c.polling, 0, 1); ok { 	//TODO: look at memory ordering
 		defer (sync.atomic_store(&c.polling, 0))
@@ -238,8 +240,8 @@ cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
 				i := set_index * SET_ASSOC + slot
 
 				if p.state == .Read_Pending {
-					err := c.io.read_at(
-						c.io.data,
+					err := Cache.IO.read_at(
+						c.io_state,
 						{page_index = cast(u32)i, op = .READ, payload = 0},
 						p.data,
 						cache_file_offset(c, p.index),
@@ -252,8 +254,8 @@ cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
 					continue
 				}
 				if p.state == .Dirty && p.written_bytes == c.page_size {
-					err := c.io.write_at(
-						c.io.data,
+					err := Cache.IO.write_at(
+						c.io_state,
 						{page_index = cast(u32)i, op = .WRITE, payload = 0},
 						p.data,
 						cache_file_offset(c, p.index),
@@ -272,7 +274,7 @@ cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
 		if !c.sync_in_progress {
 			if _, pending := sync.atomic_compare_exchange_strong(&c.sync_pending, true, false); pending {
 				target := sync.atomic_load(&c.sync_pending_index)
-				if err := c.io.sync(c.io.data, {}); err != nil {
+				if err := Cache.IO.sync(c.io_state, {}); err != nil {
 					sync.atomic_store(&c.sync_pending, true)
 				} else {
 					c.sync_index = target
@@ -282,7 +284,7 @@ cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
 		}
 
 		// Process IO completions, for each one, update state accordingly
-		n, _ := c.io.poll(c.io.data, c.io_completions)
+		n, _ := Cache.IO.poll(c.io_state, c.io_completions)
 
 		for ce, _ in c.io_completions[:n] {
 			if ce.res < 0 {
@@ -338,18 +340,18 @@ cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
 }
 
 // Writes through target must have completed before requesting sync.
-cache_sync :: proc(c: ^PageCache, target: i64) {
+cache_sync :: proc(c: ^$Cache/PageCache_Impl, target: i64) {
 	sync.atomic_store(&c.sync_pending_index, target)
 	sync.atomic_store(&c.sync_pending, true)
 }
 
 @(private)
-cache_file_offset :: proc(c: ^PageCache, page_index: i64) -> u64 {
+cache_file_offset :: proc(c: ^$Cache/PageCache_Impl, page_index: i64) -> u64 {
 	return u64((page_index % c.pages_per_file) * c.page_size)
 }
 
 @(private)
-cache_lock_set :: proc(c: ^PageCache, set_index: i64) -> ^Set(SET_ASSOC) {
+cache_lock_set :: proc(c: ^$Cache/PageCache_Impl, set_index: i64) -> ^Set(SET_ASSOC) {
 	set := &c.sets[set_index]
 	for ok := false; !ok; {
 		_, ok = sync.atomic_compare_exchange_strong(&set.lock, 0, 1)
@@ -363,7 +365,7 @@ cache_unlock_set :: proc(set: ^Set(SET_ASSOC)) {
 }
 
 @(private)
-cache_pin_pages :: proc(c: ^PageCache, start_page, end_page: i64, initial_state: PageState) {
+cache_pin_pages :: proc(c: ^$Cache/PageCache_Impl, start_page, end_page: i64, initial_state: PageState) {
 	// TODO: acquire pages in chunks
 	for curr_page := start_page; curr_page <= end_page; {
 		set := cache_lock_set(c, curr_page % i64(len(c.sets)))

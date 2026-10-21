@@ -1,16 +1,22 @@
 package rifle
 
-IO :: struct {
-	data:     rawptr,
-	init:     proc(ctx: rawptr, cache_buffer: []u8) -> RifleError,
-	deinit:   proc(ctx: rawptr) -> RifleError,
-	open:     proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
-	close:    proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
-	read_at:  proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
-	write_at: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
-	sync:     proc(ctx: rawptr, user_data: IOUserData) -> RifleError,
-	delete:   proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
-	poll:     proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError),
+IO_Impl :: struct(
+	$State: typeid,
+	$init: proc(ctx: rawptr, cache_buffer: []u8) -> RifleError,
+	$deinit: proc(ctx: rawptr) -> RifleError,
+	$open: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
+	$close: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
+	$read_at: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
+	$write_at: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
+	$sync: proc(ctx: rawptr, user_data: IOUserData) -> RifleError,
+	$delete: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
+	$poll: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError),
+) {}
+
+when ODIN_OS == .Linux {
+	IO :: IO_Impl(UringIO, uring_init, uring_deinit, uring_open, uring_close, uring_readat, uring_writeat, uring_sync, uring_delete, uring_poll)
+} else {
+	#panic("Unimplemented")
 }
 
 IOCompletion :: struct {

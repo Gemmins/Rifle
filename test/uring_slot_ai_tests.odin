@@ -207,9 +207,9 @@ uring_close_late_timeout_preserves_reused_slot :: proc(t: ^testing.T) {
 @(test)
 uring_close_after_sync_returns_capacity :: proc(t: ^testing.T) {
 	s := new_test_io(t)
-	uio := cast(^rifle.UringIO)s.io.data
+	uio := s.io
 	uio.config.num_files = 1
-	err := s.io.init(s.io.data, s.buffer)
+	err := rifle.IO.init(s.io, s.buffer)
 	s.initialized = err == nil
 	extra_require(t, err == nil)
 	path :: "/tmp/rifle_close_pending_write.rfl"
@@ -224,8 +224,8 @@ uring_close_after_sync_returns_capacity :: proc(t: ^testing.T) {
 		op         = .OPEN,
 		page_index = u32(42),
 	}
-	testing.expect(t, s.io.open(s.io.data, open_data, file) != nil)
-	testing.expect(t, s.io.open(s.io.data, open_data, {id = 904, path = path}) != nil)
+	testing.expect(t, rifle.IO.open(s.io, open_data, file) != nil)
+	testing.expect(t, rifle.IO.open(s.io, open_data, {id = 904, path = path}) != nil)
 	testing.expect(t, len(uio.file_index.file_map) == 1 && uio.file_index.slots[0].file_id == file.id)
 
 	extra_pattern(s.buffer[:PAGE_SIZE], 91)
@@ -234,9 +234,9 @@ uring_close_after_sync_returns_capacity :: proc(t: ^testing.T) {
 		page_index = u32(7),
 		payload    = 101,
 	}
-	extra_require(t, s.io.write_at(s.io.data, write_data, s.buffer[:PAGE_SIZE], 0, file) == nil)
+	extra_require(t, rifle.IO.write_at(s.io, write_data, s.buffer[:PAGE_SIZE], 0, file) == nil)
 	extra_one(t, s, write_data, PAGE_SIZE)
-	extra_require(t, s.io.sync(s.io.data, {op = .SYNC, page_index = u32(7)}) == nil)
+	extra_require(t, rifle.IO.sync(s.io, {op = .SYNC, page_index = u32(7)}) == nil)
 	testing.expect(t, uio.file_index.slots[0].state == .Flushing)
 	extra_one(t, s, {op = .SYNC, page_index = u32(7)}, 0)
 	testing.expect(t, uio.file_index.slots[0].state == .Open)
@@ -256,9 +256,9 @@ uring_close_after_sync_returns_capacity :: proc(t: ^testing.T) {
 @(test)
 uring_implicit_read_uses_registered_slots :: proc(t: ^testing.T) {
 	s := new_test_io(t)
-	uio := cast(^rifle.UringIO)s.io.data
+	uio := s.io
 	uio.config.num_files = 2
-	err := s.io.init(s.io.data, s.buffer)
+	err := rifle.IO.init(s.io, s.buffer)
 	s.initialized = err == nil
 	extra_require(t, err == nil)
 	paths := [2]cstring{"/tmp/rifle_implicit_read_a.rfl", "/tmp/rifle_implicit_read_b.rfl"}
@@ -279,7 +279,7 @@ uring_implicit_read_uses_registered_slots :: proc(t: ^testing.T) {
 			page_index = u32(indices[i]),
 			payload    = 102,
 		}
-		extra_require(t, s.io.read_at(s.io.data, data, dst, 0, file) == nil)
+		extra_require(t, rifle.IO.read_at(s.io, data, dst, 0, file) == nil)
 		opened := data
 		opened.op = .OPEN
 		expected := [2]rifle.IOUserData{opened, data}
@@ -299,9 +299,9 @@ uring_implicit_read_uses_registered_slots :: proc(t: ^testing.T) {
 @(test)
 uring_implicit_write_uses_registered_slots :: proc(t: ^testing.T) {
 	s := new_test_io(t)
-	uio := cast(^rifle.UringIO)s.io.data
+	uio := s.io
 	uio.config.num_files = 2
-	err := s.io.init(s.io.data, s.buffer)
+	err := rifle.IO.init(s.io, s.buffer)
 	s.initialized = err == nil
 	extra_require(t, err == nil)
 	paths := [2]cstring{"/tmp/rifle_implicit_write_a.rfl", "/tmp/rifle_implicit_write_b.rfl"}
@@ -317,7 +317,7 @@ uring_implicit_write_uses_registered_slots :: proc(t: ^testing.T) {
 			page_index = u32(indices[i]),
 			payload    = 101,
 		}
-		extra_require(t, s.io.write_at(s.io.data, data, src, 0, file) == nil)
+		extra_require(t, rifle.IO.write_at(s.io, data, src, 0, file) == nil)
 		opened := data
 		opened.op = .OPEN
 		expected := [2]rifle.IOUserData{opened, data}
