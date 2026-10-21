@@ -269,13 +269,13 @@ ai_cache_paths :: proc(c: ^rifle.PageCache, storage: []u8) {
 @(test)
 cache_page_file_paths :: proc(t: ^testing.T) {
 	f: Fake_IO
-	pc: rifle.PageCache
+	pc := new(rifle.PageCache)
 	durable_index: i64
-	extra_require(t, rifle.cache_init(&pc, 64, 16, fake_io(&f), "/tmp/rifle/", 32, &durable_index) == nil)
-	defer rifle.cache_delete(&pc)
+	extra_require(t, rifle.cache_init(pc, 64, 16, fake_io(&f), "/tmp/rifle/", 32, &durable_index) == nil)
+	defer rifle.cache_deinit(pc)
 	pc.record_size = 4
 	data: [64]u8
-	rifle.cache_write(&pc, data[:], 0, 16)
+	rifle.cache_write(pc, data[:], 0, 16)
 	for &p in pc.pages {
 		testing.expect_value(t, p.file_id, p.index / 2)
 		expected := p.file_id == 0 ? "/tmp/rifle/data_0.rfl" : "/tmp/rifle/data_1.rfl"
@@ -286,17 +286,17 @@ cache_page_file_paths :: proc(t: ^testing.T) {
 	p.ref_count = 0
 	p.state = .Clean
 	path_address := p.path
-	rifle.cache_write(&pc, data[:16], 400 * 4, 4)
+	rifle.cache_write(pc, data[:16], 400 * 4, 4)
 	testing.expect_value(t, p.file_id, i64(200))
 	testing.expect_value(t, string(p.path), "/tmp/rifle/data_200.rfl")
 	testing.expect(t, p.path == path_address)
 	p.state = .Clean
-	rifle.cache_write(&pc, data[:16], 8 * 4, 4)
+	rifle.cache_write(pc, data[:16], 8 * 4, 4)
 	testing.expect_value(t, string(p.path), "/tmp/rifle/data_4.rfl")
 	testing.expect(t, p.path == path_address)
 	// Poll uses the file metadata and the offset within that file.
 	p.index = 9
-	rifle.cache_poll(&pc)
+	rifle.cache_poll(pc)
 	found := false
 	for r in f.requests {
 		if raw_data(r.buffer) == raw_data(p.data) {

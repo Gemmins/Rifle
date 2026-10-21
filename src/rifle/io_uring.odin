@@ -523,8 +523,10 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 		case .ALLOCATE:
 			if cqe.res == 0 {
 				#partial switch io.file_index.slots[slot].state {
-				case .Opening: io.file_index.slots[slot].state = .Open
-				case .OpeningDirty: io.file_index.slots[slot].state = .Dirty
+				case .Opening:
+					io.file_index.slots[slot].state = .Open
+				case .OpeningDirty:
+					io.file_index.slots[slot].state = .Dirty
 				}
 			}
 			completion.user_data.op = .OPEN

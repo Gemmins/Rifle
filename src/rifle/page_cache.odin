@@ -11,25 +11,27 @@ import "core:log"
 SET_ASSOC :: 4 // LRU impl requires 4
 
 //TODO: divide page pinning into sections as to not lock up all/many pages on read/write
+//TODO: handle file deletion responses
+//TODO: just a boatload of handling errors i guess
 
 PageCache :: struct {
-	page_size:      i64,
-	num_pages:      i64,
-	pages:          []Page,
-	pageData:       []u8,
-	sets:           []Set(SET_ASSOC),
-	pages_per_file: i64,
-	path_storage:   []u8,
-	base_path:      string,
-	io:             IO,
-	io_completions: []IOCompletion,
-	record_size:    i64,
-	polling:        u32,
-	sync_pending:   bool,
-	sync_in_progress: bool,
+	page_size:          i64,
+	num_pages:          i64,
+	pages:              []Page,
+	pageData:           []u8,
+	sets:               []Set(SET_ASSOC),
+	pages_per_file:     i64,
+	path_storage:       []u8,
+	base_path:          string,
+	io:                 IO,
+	io_completions:     []IOCompletion,
+	record_size:        i64,
+	polling:            u32,
+	sync_pending:       bool,
+	sync_in_progress:   bool,
 	sync_pending_index: i64,
-	sync_index: i64,
-	durable_index: ^i64,
+	sync_index:         i64,
+	durable_index:      ^i64,
 }
 
 Page :: struct {
@@ -58,7 +60,28 @@ Set :: struct($Assoc: i64) {
 	lru:   lru,
 }
 
-cache_init :: proc(c: ^PageCache, capacity_in_bytes: i64, page_size: i64 = 1 << 13, io: IO, base_path: string, file_size: i64, durable_index: ^i64) -> runtime.Allocator_Error {
+new_page_cache :: proc() -> Cache {
+	return {
+		data = new(PageCache, context.allocator),
+		init = cache_init,
+		deinit = cache_deinit,
+		read = cache_read,
+		write = cache_write,
+		poll = cache_poll,
+		sync = cache_sync,
+	}
+}
+
+cache_init :: proc(
+	ctx: rawptr,
+	capacity_in_bytes: i64,
+	page_size: i64 = 1 << 13,
+	io: IO,
+	base_path: string,
+	file_size: i64,
+	durable_index: ^i64,
+) -> runtime.Allocator_Error {
+	c := cast(^PageCache)ctx
 	{
 		assert(file_size > 0 && page_size > 0 && file_size % page_size == 0)
 		assert(durable_index != nil)
@@ -96,13 +119,15 @@ cache_init :: proc(c: ^PageCache, capacity_in_bytes: i64, page_size: i64 = 1 << 
 	return nil
 }
 
-cache_delete :: proc(c: ^PageCache) {
+cache_deinit :: proc(ctx: rawptr) {
+	c := cast(^PageCache)ctx
 	_ = c.io.deinit(c.io.data)
 	_ = delete(c.pageData)
 	_ = delete(c.sets)
 	_ = delete(c.path_storage)
 	_ = delete(c.base_path)
 	_ = delete(c.io_completions)
+	free(c)
 }
 
 // Inclusive page bounds - empty range returns (0, -1).
@@ -125,7 +150,8 @@ cache_page_range :: proc(c: ^PageCache, start, count: i64) -> (min_page, max_pag
 }
 
 //Write a number of contiguous records
-cache_write :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
+cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
+	c := cast(^PageCache)ctx
 	start_page, end_page := cache_page_range(c, start, count)
 	cache_pin_pages(c, start_page, end_page, .Clean)
 
@@ -180,7 +206,8 @@ cache_write :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
 }
 
 //Read a number of contiguous records
-cache_read :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
+cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
+	c := cast(^PageCache)ctx
 	start_page, end_page := cache_page_range(c, start, count)
 	cache_pin_pages(c, start_page, end_page, .Read_Pending)
 
@@ -227,7 +254,8 @@ cache_read :: proc(c: ^PageCache, data: []u8, start: i64, count: i64) {
 }
 
 //Issue io and handle io completions
-cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
+cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
+	c := cast(^PageCache)ctx
 	// If another thread in polling, return
 	if _, ok := sync.atomic_compare_exchange_strong(&c.polling, 0, 1); ok { 	//TODO: look at memory ordering
 		defer (sync.atomic_store(&c.polling, 0))
@@ -338,7 +366,8 @@ cache_poll :: proc(c: ^PageCache) -> (bool, RifleError) {
 }
 
 // Writes through target must have completed before requesting sync.
-cache_sync :: proc(c: ^PageCache, target: i64) {
+cache_sync :: proc(ctx: rawptr, target: i64) {
+	c := cast(^PageCache)ctx
 	sync.atomic_store(&c.sync_pending_index, target)
 	sync.atomic_store(&c.sync_pending, true)
 }
