@@ -11,6 +11,7 @@ import rifle "rifle:rifle"
 Close_Test_IO :: struct {
 	io:         rifle.UringIO,
 	sq_head:    u32,
+	sq_flags:   linux.IO_Uring_Submission_Queue_Flags,
 	cq_head:    u32,
 	cq_tail:    u32,
 	cqes:       [2]linux.IO_Uring_CQE,
@@ -39,6 +40,7 @@ make_close_test_io :: proc(t: ^testing.T, close_result: i32) -> ^Close_Test_IO {
 	}
 	s.io.file_index.file_map[901] = 1
 	s.io.ring.sq.head = &s.sq_head
+	s.io.ring.sq.flags = &s.sq_flags
 	s.cq_tail = 2
 	s.io.ring.cq = uring.Completion_Queue {
 		head = &s.cq_head,

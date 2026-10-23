@@ -7,12 +7,12 @@ import "core:thread"
 import "core:time"
 import rifle "rifle:rifle"
 
-RECORD_SIZE :: 128
-RECORDS_PER_BLOCK :: 1 << 12
-BLOCKS_PER_FILE :: 1 << 10
-CACHE_SIZE_IN_BLOCKS :: 1 << 6
+RECORD_SIZE :: 8
+RECORDS_PER_BLOCK :: 1 << 10
+BLOCKS_PER_FILE :: 1 << 20
+CACHE_SIZE_IN_BLOCKS :: 1 << 10
 MAX_OPEN_FILES :: 64
-RECORDS_PER_THREAD :: 1 << 24
+RECORDS_PER_THREAD :: 1 << 26
 N_THREADS :: 1
 LOG_PATH :: "./example/idk"
 
