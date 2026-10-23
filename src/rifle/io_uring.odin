@@ -460,6 +460,13 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 		}
 	}
 
+	if uring.cq_ring_needs_flush(&io.ring) {
+		_, err := linux.io_uring_enter(io.ring.fd, 0, 0, {.GETEVENTS}, nil) // TODO: swap to uring method
+		if err != .NONE {
+			return 0, .GenericError
+		}
+	}
+
 	n := uring.cq_ready(&io.ring)
 	head := io.ring.cq.head^
 	mask := io.ring.cq.mask
