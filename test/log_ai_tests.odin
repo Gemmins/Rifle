@@ -25,7 +25,7 @@ make_test_log :: proc(
 	t: ^testing.T,
 	name: string,
 	cache_blocks: i64 = L_CACHE_BLOCKS,
-) -> (^rifle.Log, string) {
+) -> (^rifle.Log_old, string) {
 	td, _ := os.temp_dir(context.allocator)
 	dir := fmt.aprintf("%s/rifle_%s", td, name)
 	delete(td)
@@ -42,7 +42,7 @@ make_test_log :: proc(
 	return l, dir
 }
 
-destroy_test_log :: proc(l: ^rifle.Log, dir: string) {
+destroy_test_log :: proc(l: ^rifle.Log_old, dir: string) {
 	rifle.log_destroy(l)
 	// TODO: recursively remove dir and its contents
 	delete(dir)

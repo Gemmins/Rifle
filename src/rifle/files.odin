@@ -21,16 +21,8 @@ BaseHeader :: struct {
 	blocks_per_file:   i64,
 }
 
-log_create_or_open_storage_file :: proc(l: ^Log, index: i64) -> (err: RifleError) {
-	path := fmt.bprint(
-		l.path_slice,
-		l.base_path,
-		PATH_SEPARATOR,
-		DATA_PREFIX,
-		index,
-		FILE_EXTENSION,
-		sep = "",
-	)
+log_create_or_open_storage_file :: proc(l: ^Log_old, index: i64) -> (err: RifleError) {
+	path := fmt.bprint(l.path_slice, l.base_path, PATH_SEPARATOR, DATA_PREFIX, index, FILE_EXTENSION, sep = "")
 
 	nbio.open_poly2(
 		path,
@@ -44,22 +36,8 @@ log_create_or_open_storage_file :: proc(l: ^Log, index: i64) -> (err: RifleError
 	return nil
 }
 
-log_create_or_open_storage_file_blocking :: proc(
-	l: ^Log,
-	index: i64,
-) -> (
-	file: FileInfo,
-	err: RifleError,
-) {
-	path := fmt.bprint(
-		l.path_slice,
-		l.base_path,
-		PATH_SEPARATOR,
-		DATA_PREFIX,
-		index,
-		FILE_EXTENSION,
-		sep = "",
-	)
+log_create_or_open_storage_file_blocking :: proc(l: ^Log_old, index: i64) -> (file: FileInfo, err: RifleError) {
+	path := fmt.bprint(l.path_slice, l.base_path, PATH_SEPARATOR, DATA_PREFIX, index, FILE_EXTENSION, sep = "")
 
 	handle, error := nbio.open_sync(path, mode = {.Read, .Write, .Create, .Sync}, l = l.io_loop)
 	if error != nil {
@@ -68,10 +46,7 @@ log_create_or_open_storage_file_blocking :: proc(
 		return
 	} // TODO: handle
 
-	fallocate_storage_file(
-		handle,
-		l.blocks_per_file * l.records_per_block * l.record_size,
-	) or_return
+	fallocate_storage_file(handle, l.blocks_per_file * l.records_per_block * l.record_size) or_return
 
 	file = FileInfo {
 		handle  = handle,
@@ -84,7 +59,7 @@ log_create_or_open_storage_file_blocking :: proc(
 	return file, nil
 }
 
-register_file_handle :: proc(op: ^nbio.Operation, l: ^Log, index: i64) {
+register_file_handle :: proc(op: ^nbio.Operation, l: ^Log_old, index: i64) {
 	handle := op.specifics.open.handle
 	_ = fallocate_storage_file(handle, l.blocks_per_file * l.records_per_block * l.record_size) // TODO: handle
 	lru.set(l.open_files, index, FileInfo{handle = handle, index = index, readers = 0})
@@ -112,7 +87,7 @@ ensure_base_directory_exists_or_create :: proc(path: string) -> RifleError {
 	return nil
 }
 
-write_base_file :: proc(l: ^Log) -> RifleError {
+write_base_file :: proc(l: ^Log_old) -> RifleError {
 	path := fmt.bprint(l.path_slice, l.base_path, PATH_SEPARATOR, BASE_FILENAME, sep = "")
 	file, err := os.create(path)
 	if err != nil {

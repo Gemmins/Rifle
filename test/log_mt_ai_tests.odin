@@ -14,7 +14,7 @@ MT_RECORDS_PER_THREAD :: 256
 MT_TOTAL_RECORDS    :: MT_THREADS * MT_RECORDS_PER_THREAD
 
 MT_Producer :: struct {
-	l:         ^rifle.Log,
+	l:         ^rifle.Log_old,
 	thread_id: int,
 	count:     int,
 	err:       rifle.RifleError,
@@ -37,7 +37,7 @@ mt_producer_proc :: proc(t: ^thread.Thread) {
 	}
 }
 
-run_producers :: proc(l: ^rifle.Log, n_threads, records_per_thread: int) -> []MT_Producer {
+run_producers :: proc(l: ^rifle.Log_old, n_threads, records_per_thread: int) -> []MT_Producer {
 	producers := make([]MT_Producer, n_threads)
 	threads := make([]^thread.Thread, n_threads)
 	defer delete(threads)
@@ -220,7 +220,7 @@ log_mt_exceeds_cache_capacity :: proc(t: ^testing.T) {
 // cache locality and forces evicted blocks to be re-fetched from disk.
 
 MT_Reader :: struct {
-	l:         ^rifle.Log,
+	l:         ^rifle.Log_old,
 	targets:   []i64,
 	bad_reads: int,
 	seen:      [][]int, // [thread_id][seq] count, owned by parent

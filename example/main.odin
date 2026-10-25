@@ -17,7 +17,7 @@ N_THREADS :: 1
 LOG_PATH :: "./example/idk"
 
 Thread_Data :: struct {
-	m: ^rifle.Log,
+	m: ^rifle.Log_old,
 }
 
 write_thread :: proc(t: ^thread.Thread) {
@@ -37,7 +37,7 @@ write_thread :: proc(t: ^thread.Thread) {
 	}
 }
 
-bench_single :: proc(l: ^rifle.Log) {
+bench_single :: proc(l: ^rifle.Log_old) {
 	a, _ := runtime.make_aligned([]u8, RECORD_SIZE, RECORD_SIZE)
 	count1 := 0
 	start := time.now()._nsec
@@ -63,7 +63,7 @@ bench_single :: proc(l: ^rifle.Log) {
 	fmt.println(count1)
 }
 
-bench_multi :: proc(l: ^rifle.Log, n: int) {
+bench_multi :: proc(l: ^rifle.Log_old, n: int) {
 	thread_data := make([]Thread_Data, n)
 	threads := make([]^thread.Thread, n)
 	defer delete(thread_data)

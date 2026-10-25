@@ -12,7 +12,7 @@ Cache :: struct {
 		base_path: string,
 		file_size: i64,
 		durable_index: ^i64,
-	) -> runtime.Allocator_Error,
+	) -> runtime.Allocator_Error, //TODO: this should return a RifleError
 	deinit: proc(ctx: rawptr),
 	read:   proc(ctx: rawptr, data: []u8, start: i64, count: i64),
 	write:  proc(ctx: rawptr, data: []u8, start: i64, count: i64),
