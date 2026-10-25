@@ -29,7 +29,7 @@ fake_io :: proc(f: ^Fake_IO) -> rifle.IO {
 		read_at = fake_io_read,
 		write_at = fake_io_write,
 		sync = fake_io_sync,
-		delete = fake_io_delete,
+		unlink = fake_io_unlink,
 		poll = fake_io_poll,
 	}
 }
@@ -83,7 +83,7 @@ fake_io_write :: proc(ctx: rawptr, data: rifle.IOUserData, buffer: []u8, offset:
 fake_io_sync :: proc(ctx: rawptr, data: rifle.IOUserData) -> rifle.RifleError {
 	return fake_io_queue(cast(^Fake_IO)ctx, .SYNC, data)
 }
-fake_io_delete :: proc(ctx: rawptr, data: rifle.IOUserData, file: rifle.RifleFile) -> rifle.RifleError {
+fake_io_unlink :: proc(ctx: rawptr, data: rifle.IOUserData, file: rifle.RifleFile) -> rifle.RifleError {
 	return fake_io_queue(cast(^Fake_IO)ctx, .DELETE, data, file)
 }
 

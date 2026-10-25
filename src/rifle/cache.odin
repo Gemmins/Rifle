@@ -18,4 +18,5 @@ Cache :: struct {
 	write:  proc(ctx: rawptr, data: []u8, start: i64, count: i64),
 	poll:   proc(ctx: rawptr) -> (bool, RifleError),
 	sync:   proc(ctx: rawptr, target: i64),
+	drop:   proc(ctx: rawptr, index: i64),
 }

@@ -9,7 +9,7 @@ IO :: struct {
 	read_at:  proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
 	write_at: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
 	sync:     proc(ctx: rawptr, user_data: IOUserData) -> RifleError,
-	delete:   proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
+	unlink:   proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
 	poll:     proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError),
 }
 

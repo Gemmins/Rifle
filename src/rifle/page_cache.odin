@@ -13,6 +13,7 @@ SET_ASSOC :: 4 // LRU impl requires 4
 //TODO: divide page pinning into sections as to not lock up all/many pages on read/write
 //TODO: handle file deletion responses
 //TODO: just a boatload of handling errors i guess
+//TODO: further consideration around behaviour of dropping files - ordering, reading from etc.
 
 PageCache :: struct {
 	page_size:          i64,
@@ -69,6 +70,7 @@ new_page_cache :: proc() -> Cache {
 		write = cache_write,
 		poll = cache_poll,
 		sync = cache_sync,
+		drop = cache_drop,
 	}
 }
 
@@ -149,7 +151,8 @@ cache_page_range :: proc(c: ^PageCache, start, count: i64) -> (min_page, max_pag
 	return (start * c.record_size) / c.page_size, ((start + count) * c.record_size - 1) / c.page_size
 }
 
-//Write a number of contiguous records
+// TODO: remove large amount of redunant locking here - the page state should protect from eviction, only update the lru once on completion of flush
+// Write a number of contiguous records
 cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 	c := cast(^PageCache)ctx
 	start_page, end_page := cache_page_range(c, start, count)
@@ -251,6 +254,20 @@ cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 		curr_page += 1
 	}
 
+}
+
+// Writes through target must have completed before requesting sync.
+cache_sync :: proc(ctx: rawptr, target: i64) {
+	c := cast(^PageCache)ctx
+	sync.atomic_store(&c.sync_pending_index, target)
+	sync.atomic_store(&c.sync_pending, true)
+}
+
+// TODO: implement
+cache_drop :: proc(ctx: rawptr, index: i64) {
+	c := cast(^PageCache)ctx
+	// Need to track/use deleted file index/prefix here
+	c.io.unlink(c.io.data, {}, {})
 }
 
 //Issue io and handle io completions
@@ -363,13 +380,6 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 		return true, nil
 	}
 	return false, nil
-}
-
-// Writes through target must have completed before requesting sync.
-cache_sync :: proc(ctx: rawptr, target: i64) {
-	c := cast(^PageCache)ctx
-	sync.atomic_store(&c.sync_pending_index, target)
-	sync.atomic_store(&c.sync_pending, true)
 }
 
 @(private)

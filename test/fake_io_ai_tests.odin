@@ -59,7 +59,7 @@ fake_io_errors_and_batches :: proc(t: ^testing.T) {
 	testing.expect(t, n == 2 && out[0] == events[0] && out[1] == events[1])
 	testing.expect(t, io.close(io.data, {}, {id = 1}) == nil)
 	fake_io_complete(&f, 0, 0)
-	testing.expect(t, io.delete(io.data, {}, {id = 1}) == nil)
+	testing.expect(t, io.unlink(io.data, {}, {id = 1}) == nil)
 	fake_io_complete(&f, 0, 0)
 	n, err = io.poll(io.data, out[:])
 	testing.expect(t, n == 2 && out[0].user_data.op == .CLOSE && out[1].user_data.op == .DELETE)

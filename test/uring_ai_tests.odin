@@ -510,7 +510,7 @@ open_delete_file :: proc(t: ^testing.T) {
 		payload = 123,
 	}
 
-	err := s.io.delete(s.io.data, data, file)
+	err := s.io.unlink(s.io.data, data, file)
 	testing.expect(t, err == nil)
 
 	events := poll_events(t, s, 1)
@@ -883,7 +883,7 @@ uring_extra_delete_preserves_request_token :: proc(t: ^testing.T) {
 		page_index = 0xffffff,
 		payload    = 0xffffff,
 	}
-	extra_require(t, s.io.delete(s.io.data, data, file) == nil)
+	extra_require(t, s.io.unlink(s.io.data, data, file) == nil)
 	extra_one(t, s, data, 0)
 	testing.expect(t, !os.exists(path))
 }

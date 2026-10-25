@@ -49,17 +49,6 @@ FileInfo :: struct {
 	handle:  nbio.Handle,
 }
 
-RifleError :: enum {
-	None,
-	AllocatorError, // This discards the runtime allocator error info
-	BufferTooSmallError,
-	IndexOutOfBoundsError,
-	InvalidArgError,
-	FileOperationError,
-	GenericError,
-	FileNotReady,
-}
-
 // Lifecycle
 
 log_create :: proc(

@@ -149,7 +149,7 @@ new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> IO {
 	uring_io := new(UringIO, context.allocator)
 	uring_io.config = config
 	uring_io.dirfd = dirfd
-	io := IO{rawptr(uring_io), uring_init, uring_deinit, uring_open, uring_close, uring_readat, uring_writeat, uring_sync, uring_delete, uring_poll}
+	io := IO{rawptr(uring_io), uring_init, uring_deinit, uring_open, uring_close, uring_readat, uring_writeat, uring_sync, uring_unlink, uring_poll}
 
 	return io
 }
@@ -433,7 +433,7 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 	return nil
 }
 
-uring_delete :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError {
+uring_unlink :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
