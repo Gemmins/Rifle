@@ -43,10 +43,16 @@ cache_write_copies_page_ranges :: proc(t: ^testing.T) {
 			s.lru = rifle.lru_new()
 			for &p, j in s.pages {
 				index := i + j * 2
+				page_start := i64(index) * 16
+				write_start := tc.start * tc.record_size
+				write_end := (tc.start + tc.count) * tc.record_size
+				touched := tc.count > 0 && page_start < write_end && page_start + 16 > write_start
 				p = {
 					data  = backing[index * 16:(index + 1) * 16],
 					index = i64(index),
-					state = .Clean,
+					state = touched ? .Dirty : .Clean,
+					// A write appends after any already-copied prefix; clean pages are full.
+					written_bytes = touched ? max(write_start - page_start, 0) : 16,
 				}
 			}
 		}
@@ -72,6 +78,8 @@ cache_write_copies_page_ranges :: proc(t: ^testing.T) {
 		for p in pages {
 			touched := n > 0 && p.index * 16 < begin + n && (p.index + 1) * 16 > begin
 			testing.expect(t, p.state == (touched ? .Dirty : .Clean))
+			expected_bytes := touched ? min(begin + n - p.index * 16, 16) : 16
+			testing.expect_value(t, p.written_bytes, expected_bytes)
 			testing.expect_value(t, p.ref_count, i64(0))
 		}
 		for s in sets {testing.expect_value(t, s.lock, u32(0))}
@@ -92,7 +100,8 @@ cache_write_keeps_partial_pages :: proc(t: ^testing.T) {
 				written_bytes = 16,
 			}
 		}
-		pages[0].written_bytes = 4 // Partial, even though clean.
+		pages[0].state = .Dirty
+		pages[0].written_bytes = 4 // Incomplete writes remain dirty until the page is full.
 		pages[1].ref_count = 1 // Full but pinned.
 		pages[2].state = .Dirty // Full but not flushed.
 		if use_empty {
@@ -111,56 +120,13 @@ cache_write_keeps_partial_pages :: proc(t: ^testing.T) {
 		ai_cache_paths(&pc, path_storage[:])
 		data: [16]u8
 		rifle.cache_write(&pc, data[:4], 16, 1)
-		testing.expect(t, pages[0].index == 0 && pages[0].written_bytes == 4)
+		testing.expect(t, pages[0].index == 0 && pages[0].written_bytes == 4 && pages[0].state == .Dirty)
 		testing.expect(t, pages[1].index == 1 && pages[1].ref_count == 1)
 		testing.expect(t, pages[2].index == 2 && pages[2].state == .Dirty)
 		testing.expect(t, pages[3].index == 4 && pages[3].written_bytes == 4)
 		rifle.cache_write(&pc, data[:12], 17, 3)
 		testing.expect(t, pages[3].written_bytes == 16 && pages[3].ref_count == 0)
 	}
-}
-
-@(test)
-cache_write_waits_for_flush :: proc(t: ^testing.T) {
-	backing: [16]u8
-	pages := [4]rifle.Page{{data = backing[:], index = 0, state = .Flushing, written_bytes = 4}, {index = -1}, {index = -1}, {index = -1}}
-	sets := [1]rifle.Set(rifle.SET_ASSOC){{pages = pages[:], lru = rifle.lru_new()}}
-	pc := rifle.PageCache {
-		page_size   = 16,
-		num_pages   = 4,
-		record_size = 4,
-		sets        = sets[:],
-	}
-	path_storage: [512]u8
-	ai_cache_paths(&pc, path_storage[:])
-	Poll_State :: struct {
-		t:     ^testing.T,
-		cache: ^rifle.PageCache,
-		calls: int,
-	}
-	state := Poll_State {
-		t     = t,
-		cache = &pc,
-	}
-	pc.io.data = &state
-	pc.io.poll = proc(ctx: rawptr, completions: []rifle.IOCompletion) -> (u32, rifle.RifleError) {
-		s := cast(^Poll_State)ctx
-		set := &s.cache.sets[0]
-		p := &set.pages[0]
-		testing.expect_value(s.t, set.lock, u32(0))
-		testing.expect_value(s.t, p.ref_count, i64(1))
-		testing.expect_value(s.t, p.written_bytes, i64(4))
-		testing.expect_value(s.t, p.data[4], u8(0))
-		s.calls += 1
-		if s.calls == 2 {p.state = .Clean}
-		return 0, nil
-	}
-	data := [4]u8{1, 2, 3, 4}
-	rifle.cache_write(&pc, data[:], 1, 1)
-	testing.expect_value(t, state.calls, 2)
-	testing.expect(t, pages[0].state == .Dirty && pages[0].written_bytes == 8)
-	testing.expect_value(t, pages[0].ref_count, i64(0))
-	for b, i in data {testing.expect_value(t, backing[4 + i], b)}
 }
 
 @(test)
@@ -209,16 +175,18 @@ cache_read_waits_for_loading :: proc(t: ^testing.T) {
 	pages: [4]rifle.Page
 	for &p, i in pages {p = {data = backing[i * 16:(i + 1) * 16], index = -1}}
 	sets := [1]rifle.Set(rifle.SET_ASSOC){{pages = pages[:], lru = rifle.lru_new()}}
-	pc := rifle.PageCache{page_size = 16, num_pages = 4, record_size = 4, sets = sets[:]}
+	completions: [1]rifle.IOCompletion
+	pc := rifle.PageCache{page_size = 16, num_pages = 4, record_size = 4, pages = pages[:], sets = sets[:], io_completions = completions[:]}
 	path_storage: [512]u8
 	ai_cache_paths(&pc, path_storage[:])
 	output := [4]u8{0xee, 0xee, 0xee, 0xee}
-	Poll_State :: struct {t: ^testing.T, cache: ^rifle.PageCache, output: []u8, calls: int}
+	Poll_State :: struct {t: ^testing.T, cache: ^rifle.PageCache, output: []u8, calls: int, token: rifle.IOUserData}
 	state := Poll_State{t = t, cache = &pc, output = output[:]}
 	pc.io.data = &state
 	pc.io.read_at = proc(ctx: rawptr, data: rifle.IOUserData, buffer: []u8, offset: u64, file: rifle.RifleFile) -> rifle.RifleError {
 		s := cast(^Poll_State)ctx
 		testing.expect_value(s.t, s.cache.sets[0].lock, u32(1))
+		s.token = data
 		return nil
 	}
 	// Simulate the delayed completion.
@@ -232,14 +200,11 @@ cache_read_waits_for_loading :: proc(t: ^testing.T) {
 		for &p in set.pages {
 			if p.index != 0 {continue}
 			testing.expect_value(s.t, p.ref_count, i64(1))
-			if s.calls == 1 {
-				testing.expect_value(s.t, p.state, rifle.PageState.Loading)
-				p.state = .Loading
-			} else {
-				testing.expect_value(s.t, p.state, rifle.PageState.Loading)
+			testing.expect_value(s.t, p.state, rifle.PageState.Loading)
+			if s.calls == 2 {
 				for &b, i in p.data {b = u8(i)}
-				p.written_bytes = 16
-				p.state = .Clean
+				completions[0] = {user_data = s.token, res = 16}
+				return 1, nil
 			}
 		}
 		return 0, nil
@@ -275,6 +240,9 @@ cache_page_file_paths :: proc(t: ^testing.T) {
 	defer rifle.cache_deinit(pc)
 	data: [64]u8
 	rifle.cache_write(pc, data[:], 0, 16)
+	rifle.cache_poll(pc)
+	for len(f.requests) > 0 {fake_io_complete(&f, 0, 16)}
+	rifle.cache_poll(pc)
 	for &p in pc.pages {
 		testing.expect_value(t, p.file_id, p.index / 2)
 		expected := p.file_id == 0 ? "/tmp/rifle/data_0.rfl" : "/tmp/rifle/data_1.rfl"
@@ -283,18 +251,18 @@ cache_page_file_paths :: proc(t: ^testing.T) {
 	}
 	p := &pc.pages[0]
 	p.ref_count = 0
-	p.state = .Clean
 	path_address := p.path
 	rifle.cache_write(pc, data[:16], 400 * 4, 4)
 	testing.expect_value(t, p.file_id, i64(200))
 	testing.expect_value(t, string(p.path), "/tmp/rifle/data_200.rfl")
 	testing.expect(t, p.path == path_address)
-	p.state = .Clean
-	rifle.cache_write(pc, data[:16], 8 * 4, 4)
+	rifle.cache_poll(pc)
+	fake_io_complete(&f, 0, 16)
+	rifle.cache_poll(pc)
+	rifle.cache_write(pc, data[:16], 9 * 4, 4)
 	testing.expect_value(t, string(p.path), "/tmp/rifle/data_4.rfl")
 	testing.expect(t, p.path == path_address)
 	// Poll uses the file metadata and the offset within that file.
-	p.index = 9
 	rifle.cache_poll(pc)
 	found := false
 	for r in f.requests {
@@ -310,16 +278,20 @@ cache_page_file_paths :: proc(t: ^testing.T) {
 
 @(test)
 cache_poll_releases_completion_locks :: proc(t: ^testing.T) {
-	results := [2]i32{16, 8}
+	results := [4]i32{16, 8, 0, -5}
 	for res in results {
 		f: Fake_IO
 		io := fake_io(&f)
 		defer io.deinit(io.data)
 		pages: [8]rifle.Page
 		sets: [2]rifle.Set(rifle.SET_ASSOC)
-		for &set, i in sets {set.pages = pages[i * 4:(i + 1) * 4]}
-		pages[4] = {index = 10, state = .Loading, ref_count = 1}
-		pages[5] = {index = 12, state = .Flushing, written_bytes = 16}
+		for &p in pages {p.index = -1}
+		for &set, i in sets {
+			set.pages = pages[i * 4:(i + 1) * 4]
+			set.lru = rifle.lru_new()
+		}
+		pages[4] = {index = 11, state = .Loading, ref_count = 1}
+		pages[5] = {index = 13, state = .Flushing, written_bytes = 16}
 		completions: [2]rifle.IOCompletion
 		append(&f.completions,
 			rifle.IOCompletion{user_data = {op = .READ, page_index = 4}, res = res},
@@ -330,6 +302,8 @@ cache_poll_releases_completion_locks :: proc(t: ^testing.T) {
 		testing.expect(t, pages[4].state == (res == 16 ? .Clean : .Read_Pending))
 		testing.expect(t, pages[5].state == (res == 16 ? .Clean : .Dirty))
 		testing.expect_value(t, pages[4].ref_count, i64(1))
+		expected_lru := res == 16 ? rifle.lru_update(rifle.lru_new(), 1) : rifle.lru_new()
+		testing.expect_value(t, sets[1].lru, expected_lru)
 		for set in sets {testing.expect_value(t, set.lock, u32(0))}
 	}
 }

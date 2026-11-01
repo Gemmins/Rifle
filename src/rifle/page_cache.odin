@@ -12,6 +12,7 @@ SET_ASSOC :: 4 // LRU impl requires 4
 //TODO: handle file deletion responses
 //TODO: just a boatload of handling errors i guess
 //TODO: further consideration around behaviour of dropping files - ordering, reading from etc.
+//TODO: rework - again! - going to move to a combined large ring buffer for writes and page cache for reads :)
 
 PageCache :: struct {
 	page_size:          i64,
@@ -102,7 +103,7 @@ cache_init :: proc(
 	c.path_storage = make([]u8, num_pages * i64(path_size), context.allocator)
 	for &v, i in c.pages {
 		v.data = c.pageData[cast(i64)i * page_size:(cast(i64)i + 1) * page_size]
-		v.index = -1
+		sync.atomic_store_explicit(&v.index, -1, .Release)
 		v.path_buffer = c.path_storage[i * path_size:(i + 1) * path_size]
 		v.path = cstring(raw_data(v.path_buffer))
 	}
@@ -152,26 +153,21 @@ cache_page_range :: proc(c: ^PageCache, start, count: i64) -> (min_page, max_pag
 	return (start * c.record_size) / c.page_size, ((start + count) * c.record_size - 1) / c.page_size
 }
 
-// TODO: remove large amount of redunant locking here - the page state should protect from eviction, only update the lru once on completion of flush
-// Write a number of contiguous records
 cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 	c := cast(^PageCache)ctx
 	start_page, end_page := cache_page_range(c, start, count)
-	cache_pin_pages(c, start_page, end_page, .Clean)
+	cache_acquire_write_pages(c, start_page, end_page)
 
 	write_start := start * c.record_size
 	write_end := (start + count) * c.record_size
 	for curr_page := start_page; curr_page <= end_page; {
-		set := cache_lock_set(c, curr_page % i64(len(c.sets)))
+		set := &c.sets[curr_page % i64(len(c.sets))]
 
 		found := false
 		waiting := false
 		for &p in set.pages {
-			if p.index != curr_page {continue}
+			if sync.atomic_load_explicit(&p.index, .Acquire) != curr_page {continue}
 			found = true
-			{
-				assert(sync.atomic_load(&p.ref_count) > 0)
-			}
 			//TODO: Partial flushes should be using buffers outside page cache
 			// Once this is the case, this check and the poll are no longer necessary
 			if p.state == .Flushing {
@@ -186,18 +182,15 @@ cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 			dst_end := min(write_end - page_start, c.page_size)
 			src_start := page_start + dst_start - write_start
 			copy(p.data[dst_start:dst_end], data[src_start:src_start + dst_end - dst_start])
-			p.written_bytes += dst_end - dst_start
+			written_bytes := sync.atomic_add(&p.written_bytes, dst_end - dst_start) + dst_end - dst_start
 			{
-				assert(p.written_bytes <= c.page_size)
+				assert(written_bytes <= c.page_size)
 			}
-			p.state = .Dirty
-			sync.atomic_sub(&p.ref_count, 1)
 			break
 		}
 		{
 			assert(found, "pinned page is missing")
 		}
-		cache_unlock_set(set)
 
 		if waiting {
 			_, _ = cache_poll(c) // TODO: handle poll errors
@@ -213,7 +206,7 @@ cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 	c := cast(^PageCache)ctx
 	start_page, end_page := cache_page_range(c, start, count)
-	cache_pin_pages(c, start_page, end_page, .Read_Pending)
+	cache_pin_read_pages(c, start_page, end_page)
 
 	read_start := start * c.record_size
 	read_end := (start + count) * c.record_size
@@ -223,7 +216,7 @@ cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 		found := false
 		waiting := false
 		for &p in set.pages {
-			if p.index != curr_page {continue}
+			if sync.atomic_load_explicit(&p.index, .Acquire) != curr_page {continue}
 			found = true
 			{
 				assert(sync.atomic_load(&p.ref_count) > 0)
@@ -233,7 +226,7 @@ cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 				break
 			}
 			{
-				assert(p.state == .Clean || p.state == .Dirty || p.state == .Flushing) //TODO:
+				assert(p.state == .Clean || p.state == .Dirty || p.state == .Flushing)
 			}
 			page_start := curr_page * c.page_size
 			src_start := max(read_start - page_start, 0)
@@ -258,6 +251,7 @@ cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 }
 
 // Writes through target must have completed before requesting sync.
+// TODO: see comments in log for sync
 cache_sync :: proc(ctx: rawptr, target: i64) {
 	c := cast(^PageCache)ctx
 	sync.atomic_store(&c.sync_pending_index, target)
@@ -279,7 +273,7 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 		defer (sync.atomic_store(&c.polling, 0))
 		for _, set_index in c.sets { 	//TODO: Track pages needing work
 			set := cache_lock_set(c, i64(set_index))
-			defer cache_unlock_set(set) // unlock
+			defer cache_unlock_set(set)
 			for &p, slot in set.pages {
 				i := set_index * SET_ASSOC + slot
 
@@ -288,7 +282,7 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 						c.io.data,
 						{page_index = cast(u32)i, op = .READ, payload = 0},
 						p.data,
-						cache_file_offset(c, p.index),
+						cache_file_offset(c, sync.atomic_load_explicit(&p.index, .Acquire)),
 						{id = p.file_id, path = p.path},
 					)
 					if err != nil {
@@ -297,12 +291,12 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 					p.state = .Loading
 					continue
 				}
-				if p.state == .Dirty && p.written_bytes == c.page_size {
+				if p.state == .Dirty && sync.atomic_load(&p.written_bytes) == c.page_size {
 					err := c.io.write_at(
 						c.io.data,
 						{page_index = cast(u32)i, op = .WRITE, payload = 0},
 						p.data,
-						cache_file_offset(c, p.index),
+						cache_file_offset(c, sync.atomic_load_explicit(&p.index, .Acquire)),
 						{id = p.file_id, path = p.path},
 					)
 					if err != nil {
@@ -351,7 +345,7 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 				p := &c.pages[ce.user_data.page_index]
 				if i64(ce.res) != c.page_size {
 					if ce.res >= 0 {
-						log.debugf("cache read page %d: expected %d bytes, got %d", p.index, c.page_size, ce.res)
+						log.debugf("cache read page %d: expected %d bytes, got %d", sync.atomic_load_explicit(&p.index, .Acquire), c.page_size, ce.res)
 					}
 					p.state = .Read_Pending
 					continue
@@ -363,12 +357,13 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 				p := &c.pages[ce.user_data.page_index]
 				if i64(ce.res) != c.page_size {
 					if ce.res >= 0 {
-						log.debugf("cache write page %d: expected %d bytes, got %d", p.index, c.page_size, ce.res)
+						log.debugf("cache write page %d: expected %d bytes, got %d", sync.atomic_load_explicit(&p.index, .Acquire), c.page_size, ce.res)
 					}
 					p.state = .Dirty
 					continue
 				}
 				p.state = .Clean
+				set.lru = lru_update(set.lru, u8(ce.user_data.page_index % SET_ASSOC))
 
 			case .SYNC:
 				c.sync_in_progress = false
@@ -403,53 +398,78 @@ cache_unlock_set :: proc(set: ^Set(SET_ASSOC)) {
 }
 
 @(private)
-cache_pin_pages :: proc(c: ^PageCache, start_page, end_page: i64, initial_state: PageState) {
+cache_find_page :: proc(set: ^Set(SET_ASSOC), page_index: i64) -> (page: ^Page, slot: u8) {
+	for &p, i in set.pages {
+		if sync.atomic_load_explicit(&p.index, .Acquire) == page_index {
+			return &p, u8(i)
+		}
+	}
+	return nil, 0
+}
+
+// Caller must hold the set lock
+@(private)
+cache_find_or_allocate_page :: proc(c: ^PageCache, set: ^Set(SET_ASSOC), page_index: i64, initial_state: PageState) -> (page: ^Page, slot: u8) {
+	if p, i := cache_find_page(set, page_index); p != nil {
+		return p, i
+	}
+
+	for i in lru_get_order(set.lru) {
+		p := &set.pages[i]
+		if (p.state == .Empty || (p.state == .Clean && p.written_bytes == c.page_size)) && sync.atomic_load(&p.ref_count) == 0 {
+			sync.atomic_store_explicit(&p.index, -1, .Release)
+			file_id := page_index / c.pages_per_file
+			path := fmt.bprintf(p.path_buffer[:len(p.path_buffer) - 1], "%s/%s%d%s", c.base_path, DATA_PREFIX, file_id, FILE_EXTENSION)
+			p.path_buffer[len(path)] = 0
+			p.file_id = file_id
+			p.path = cstring(raw_data(p.path_buffer))
+			p.written_bytes = 0
+			p.ref_count = 0
+			p.state = initial_state
+			sync.atomic_store_explicit(&p.index, page_index, .Release)
+			return p, i
+		}
+	}
+	return nil, 0
+}
+
+@(private)
+cache_pin_read_pages :: proc(c: ^PageCache, start_page, end_page: i64) {
 	// TODO: acquire pages in chunks
 	for curr_page := start_page; curr_page <= end_page; {
 		set := cache_lock_set(c, curr_page % i64(len(c.sets)))
-
-		found := false
-		for &p, i in set.pages {
-			if p.index == curr_page {
-				sync.atomic_add(&p.ref_count, 1) // Lock page
-				set.lru = lru_update(set.lru, cast(u8)i)
-				found = true
-				break
-			}
+		p, slot := cache_find_or_allocate_page(c, set, curr_page, .Read_Pending)
+		if p != nil {
+			sync.atomic_add(&p.ref_count, 1)
+			set.lru = lru_update(set.lru, slot)
 		}
-
-		if !found {
-			lru_order := lru_get_order(set.lru)
-			for i, _ in lru_order {
-				p := &set.pages[i]
-				if (p.state == .Empty || (p.state == .Clean && p.written_bytes == c.page_size)) && sync.atomic_load(&p.ref_count) == 0 {
-					file_id := curr_page / c.pages_per_file
-					path := fmt.bprintf(p.path_buffer[:len(p.path_buffer) - 1], "%s/%s%d%s", c.base_path, DATA_PREFIX, file_id, FILE_EXTENSION)
-					p.path_buffer[len(path)] = 0
-					set.pages[i] = {
-						file_id     = file_id,
-						path        = cstring(raw_data(p.path_buffer)),
-						path_buffer = p.path_buffer,
-						data        = set.pages[i].data,
-						index       = curr_page,
-						state       = initial_state,
-						ref_count   = 1,
-					}
-					set.lru = lru_update(set.lru, i)
-					found = true
-					break
-				}
-			}
-		}
-
 		cache_unlock_set(set)
-		if !found { 	// In the case of a failed eviction we advance the cache and try whole thing again
+
+		if p == nil {
 			_, _ = cache_poll(c) // TODO: handle poll errors
-			if initial_state == .Read_Pending {
-			}
 			continue
 		}
 		curr_page += 1
 	}
+}
 
+@(private)
+cache_acquire_write_pages :: proc(c: ^PageCache, start_page, end_page: i64) {
+	// TODO: acquire pages in chunks
+	for curr_page := start_page; curr_page <= end_page; {
+		set_index := curr_page % i64(len(c.sets))
+		set := &c.sets[set_index]
+		p, _ := cache_find_page(set, curr_page)
+		if p == nil {
+			set = cache_lock_set(c, set_index)
+			p, _ = cache_find_or_allocate_page(c, set, curr_page, .Dirty)
+			cache_unlock_set(set)
+		}
+
+		if p == nil {
+			_, _ = cache_poll(c) // TODO: handle poll errors
+			continue
+		}
+		curr_page += 1
+	}
 }

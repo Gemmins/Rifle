@@ -135,3 +135,52 @@ log_write_concurrent_batches :: proc(t: ^testing.T) {
 		testing.expect_value(t, l.commit_ring[u64(record) & l.commit_mask].value, i64(record))
 	}
 }
+
+@(test)
+log_completion_ring_does_not_overwrite_blocked_head :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+	l: rifle.Log
+	l.commit_ring = make(type_of(l.commit_ring), 4)
+	defer delete(l.commit_ring)
+	l.commit_mask = 3
+	for &slot in l.commit_ring {slot.value = -1}
+	gate: Log_Write_Gate
+	l.cache.data = &gate
+	l.cache.write = proc(ctx: rawptr, data: []u8, start, count: i64) {
+		if start == 0 {
+			g := cast(^Log_Write_Gate)ctx
+			sync.sema_post(&g.entered)
+			sync.sema_wait(&g.release)
+		}
+	}
+	slow := Log_Write_Worker{log = &l, count = 1}
+	fast := Log_Write_Worker{log = &l, count = 7}
+	first := thread.create(log_write_worker)
+	first.data = &slow
+	thread.start(first)
+	if !testing.expect(t, sync.sema_wait_with_timeout(&gate.entered, time.Second)) {
+		sync.sema_post(&gate.release)
+		thread.join(first)
+		thread.destroy(first)
+		return
+	}
+	second := thread.create(log_write_worker)
+	second.data = &fast
+	thread.start(second)
+	deadline := time.now()._nsec + i64(time.Second)
+	for sync.atomic_load(&l.commit_ring[3].value) != 3 && time.now()._nsec < deadline {
+		time.sleep(time.Millisecond)
+	}
+	testing.expect_value(t, sync.atomic_load(&l.commit_ring[3].value), i64(3))
+	testing.expect_value(t, sync.atomic_load(&l.commit_ring[0].value), i64(-1))
+	testing.expect_value(t, sync.atomic_load(&l.visible_index.value), i64(0))
+	sync.sema_post(&gate.release)
+	thread.join(first)
+	thread.join(second)
+	thread.destroy(first)
+	thread.destroy(second)
+	testing.expect(t, slow.err == nil && fast.err == nil)
+	testing.expect(t, slow.index == 0 && fast.index == 1)
+	testing.expect_value(t, l.visible_index.value, i64(8))
+	for i in 0 ..< 4 {testing.expect_value(t, l.commit_ring[i].value, i64(i + 4))}
+}
