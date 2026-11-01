@@ -4,6 +4,7 @@ import "core:container/lru"
 import "core:fmt"
 import "core:nbio"
 import "core:os"
+import "core:strings"
 import "core:sys/linux"
 
 FILE_EXTENSION :: ".rfl"
@@ -14,11 +15,11 @@ PATH_SEPARATOR :: "/"
 BASE_VERSION :: u32(1)
 
 BaseHeader :: struct {
-	magic:             [4]u8,
-	version:           u32,
-	record_size:       i64,
-	records_per_block: i64,
-	blocks_per_file:   i64,
+	magic:           [4]u8,
+	version:         u32,
+	record_size:     i64,
+	page_size_bytes: i64,
+	file_size_bytes: i64,
 }
 
 log_create_or_open_storage_file :: proc(l: ^Log_old, index: i64) -> (err: RifleError) {
@@ -87,8 +88,8 @@ ensure_base_directory_exists_or_create :: proc(path: string) -> RifleError {
 	return nil
 }
 
-write_base_file :: proc(l: ^Log_old) -> RifleError {
-	path := fmt.bprint(l.path_slice, l.base_path, PATH_SEPARATOR, BASE_FILENAME, sep = "")
+write_base_file :: proc(l: ^Log) -> RifleError {
+	path := strings.concatenate({cast(string)l.config.log_path, PATH_SEPARATOR, BASE_FILENAME})
 	file, err := os.create(path)
 	if err != nil {
 		return .FileOperationError
@@ -96,11 +97,11 @@ write_base_file :: proc(l: ^Log_old) -> RifleError {
 	defer os.close(file)
 
 	header := BaseHeader { 	// TODO: sort this thing out
-		magic             = {'R', 'F', 'L', 'E'},
-		version           = BASE_VERSION,
-		record_size       = l.record_size,
-		records_per_block = l.records_per_block,
-		blocks_per_file   = l.blocks_per_file,
+		magic           = {'R', 'F', 'L', 'E'},
+		version         = BASE_VERSION,
+		record_size     = l.config.record_size,
+		page_size_bytes = l.config.page_size_bytes,
+		file_size_bytes = l.config.file_size_bytes,
 	}
 	bytes := (cast([^]u8)&header)[:size_of(BaseHeader)]
 	if _, write_err := os.write(file, bytes); write_err != nil {

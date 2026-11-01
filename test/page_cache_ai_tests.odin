@@ -271,9 +271,8 @@ cache_page_file_paths :: proc(t: ^testing.T) {
 	f: Fake_IO
 	pc := new(rifle.PageCache)
 	durable_index: i64
-	extra_require(t, rifle.cache_init(pc, 64, 16, fake_io(&f), "/tmp/rifle/", 32, &durable_index) == nil)
+	extra_require(t, rifle.cache_init(pc, 64, 16, fake_io(&f), "/tmp/rifle/", 32, 4, &durable_index) == nil)
 	defer rifle.cache_deinit(pc)
-	pc.record_size = 4
 	data: [64]u8
 	rifle.cache_write(pc, data[:], 0, 16)
 	for &p in pc.pages {

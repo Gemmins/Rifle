@@ -1,6 +1,5 @@
 package rifle
 
-import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
@@ -9,7 +8,6 @@ import "core:sync"
 import "core:log"
 
 SET_ASSOC :: 4 // LRU impl requires 4
-
 //TODO: divide page pinning into sections as to not lock up all/many pages on read/write
 //TODO: handle file deletion responses
 //TODO: just a boatload of handling errors i guess
@@ -81,8 +79,9 @@ cache_init :: proc(
 	io: IO,
 	base_path: string,
 	file_size: i64,
+	record_size: i64,
 	durable_index: ^i64,
-) -> runtime.Allocator_Error {
+) -> RifleError {
 	c := cast(^PageCache)ctx
 	{
 		assert(file_size > 0 && page_size > 0 && file_size % page_size == 0)
@@ -113,6 +112,8 @@ cache_init :: proc(
 		s.pages = c.pages[(i * SET_ASSOC):(i * SET_ASSOC) + SET_ASSOC]
 		s.lru = lru_new()
 	}
+
+	c.record_size = record_size
 
 	c.io_completions = make([]IOCompletion, 128, context.allocator) //TODO: actual count
 	c.io = io
@@ -444,6 +445,8 @@ cache_pin_pages :: proc(c: ^PageCache, start_page, end_page: i64, initial_state:
 		cache_unlock_set(set)
 		if !found { 	// In the case of a failed eviction we advance the cache and try whole thing again
 			_, _ = cache_poll(c) // TODO: handle poll errors
+			if initial_state == .Read_Pending {
+			}
 			continue
 		}
 		curr_page += 1

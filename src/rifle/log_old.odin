@@ -87,7 +87,7 @@ log_create :: proc(
 	l.blocks_per_file = blocks_per_file
 
 	ensure_base_directory_exists_or_create(path) or_return
-	write_base_file(l) or_return
+	// write_base_file(l) or_return
 
 	l.record_shift = intrinsics.count_trailing_zeros(cast(u64)records_per_block)
 	l.block_shift = intrinsics.count_trailing_zeros(cast(u64)blocks_per_file)

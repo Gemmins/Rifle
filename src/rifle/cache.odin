@@ -1,7 +1,5 @@
 package rifle
 
-import "base:runtime"
-
 Cache :: struct {
 	data:   rawptr,
 	init:   proc(
@@ -11,8 +9,9 @@ Cache :: struct {
 		io: IO,
 		base_path: string,
 		file_size: i64,
+		record_size: i64,
 		durable_index: ^i64,
-	) -> runtime.Allocator_Error, //TODO: this should return a RifleError
+	) -> RifleError, //TODO: this should return a RifleError
 	deinit: proc(ctx: rawptr),
 	read:   proc(ctx: rawptr, data: []u8, start: i64, count: i64),
 	write:  proc(ctx: rawptr, data: []u8, start: i64, count: i64),
