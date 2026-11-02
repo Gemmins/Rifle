@@ -494,6 +494,9 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 
 		switch ud.op {
 		case .OPEN:
+			if cqe.res != 0 {
+				remove_file(&io.file_index, slot)
+			}
 		case .CLOSE:
 			{
 				assert(io.file_index.slots[slot].state == .Closing)

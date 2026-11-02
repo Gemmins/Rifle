@@ -13,4 +13,5 @@ RifleError :: enum {
 	FileNotReady,
 	UnsupportedPlatformError,
 	UnimplementedError,
+	InvalidFileFormatError,
 }

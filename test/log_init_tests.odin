@@ -7,15 +7,15 @@ import "core:testing"
 
 @(test)
 log_init_rejects_invalid_config :: proc(t: ^testing.T) {
-	for case_index in 0 ..< 24 {
+	for case_index in 0 ..< 25 {
 		config := rifle.DefaultLogConfig
 		config.log_path = "/nonexistent/rifle-config-validation"
-		config.record_size = 6
+		config.schema = {record_size = 6, fields = []rifle.SchemaField{{name = "value", type = .Bytes, size = 6}}}
 		switch case_index {
 		case 0: config.log_path = nil
 		case 1: config.log_path = ""
-		case 2: config.record_size = 0
-		case 3: config.record_size = -1
+		case 2: config.schema.record_size = 0
+		case 3: config.schema.record_size = -1
 		case 4: config.page_size_bytes = 0
 		case 5: config.page_size_bytes = 2048
 		case 6: config.page_size_bytes = 6144
@@ -35,6 +35,7 @@ log_init_rejects_invalid_config :: proc(t: ^testing.T) {
 		case 20: config.file_size_bytes = -1
 		case 21: config.commit_ring_size = -1
 		case 22: config.commit_ring_size = 1 << 62
+		case 24: config.schema.fields = nil
 		case 23: config.cache_size_bytes = config.page_size_bytes / 2
 		}
 		// Invalid configuration must be rejected before trying to open the path.
@@ -49,20 +50,13 @@ log_init_missing_directory :: proc(t: ^testing.T) {
 	config := rifle.DefaultLogConfig
 	// /dev/null is a file, so resolving a child must fail without touching IO setup.
 	config.log_path = "/dev/null/rifle"
-	config.record_size = 6
+	config.schema = {record_size = 6, fields = []rifle.SchemaField{{name = "value", type = .Bytes, size = 6}}}
 	config.cache_size_bytes = 4 * config.page_size_bytes
 	config.commit_ring_size = 1
 	config.max_open_files = 1
 	log, err := rifle.log_init(config, nil)
 	testing.expect(t, log == nil)
 	testing.expect(t, err == .FileOperationError)
-}
-
-@(test)
-log_init_reopen_unimplemented :: proc(t: ^testing.T) {
-	log, err := rifle.log_init({}, "existing.rfl")
-	testing.expect(t, log == nil)
-	testing.expect(t, err == .UnimplementedError)
 }
 
 // Exercise the shared initialization with a real page cache and fake IO.
@@ -74,9 +68,8 @@ log_init_cache_and_ring :: proc(t: ^testing.T) {
 	l.config = rifle.DefaultLogConfig
 	l.config.log_path = "/tmp/rifle-log-unit"
 	l.config.cache_size_bytes = 4 * l.config.page_size_bytes
-	l.config.record_size = 6
+	l.config.schema = {record_size = 6, fields = []rifle.SchemaField{{name = "value", type = .Bytes, size = 6}}}
 	l.config.commit_ring_size = 4
-	l.record_size = l.config.record_size
 	l.io = fake_io(&f)
 	l.cache = rifle.new_page_cache()
 	err := rifle.__log_init(&l)
@@ -84,7 +77,7 @@ log_init_cache_and_ring :: proc(t: ^testing.T) {
 	defer delete(l.commit_ring)
 	if !testing.expect(t, err == nil) {return}
 	pc := cast(^rifle.PageCache)l.cache.data
-	testing.expect_value(t, pc.record_size, l.config.record_size)
+	testing.expect_value(t, pc.record_size, l.config.schema.record_size)
 	testing.expect_value(t, pc.page_size, l.config.page_size_bytes)
 	testing.expect_value(t, pc.pages_per_file, l.config.file_size_bytes / l.config.page_size_bytes)
 	testing.expect(t, pc.durable_index == &l.durable_index.value)

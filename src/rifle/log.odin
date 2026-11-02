@@ -14,7 +14,6 @@ import "core:sys/linux/uring"
 Log :: struct {
 	arena:          virtual.Arena,
 	config:         LogConfig,
-	record_size:    i64,
 	dirfd:          linux.Fd,
 	cache:          Cache,
 	io:             IO,
@@ -33,11 +32,11 @@ LogConfig :: struct {
 	page_size_bytes:  i64, // Power of 2 >= 4K
 	max_open_files:   u16, // <= 4K
 	commit_ring_size: i64, // Power of 2 (make reasonable size)
-	record_size:      i64, // TODO: Remove once record size comes from the schema
+	schema:           RecordSchema, // Required; caller keeps fields/names alive until log_deinit
 }
 
 // TODO: Choose properly
-DefaultLogConfig :: LogConfig{nil, 1 << 26, 1 << 32, 1 << 13, 1 << 8, 1 << 8, 0}
+DefaultLogConfig :: LogConfig{nil, 1 << 26, 1 << 32, 1 << 13, 1 << 8, 1 << 8, {}}
 
 
 __log_init :: proc(log: ^Log) -> (err: RifleError) {
@@ -48,7 +47,7 @@ __log_init :: proc(log: ^Log) -> (err: RifleError) {
 		log.io,
 		cast(string)log.config.log_path,
 		log.config.file_size_bytes,
-		log.record_size,
+		log.config.schema.record_size,
 		&log.durable_index.value,
 	) or_return
 
@@ -68,13 +67,10 @@ __log_init :: proc(log: ^Log) -> (err: RifleError) {
 
 // Initialise the log - do not copy Log struct
 log_init :: proc(config: LogConfig, log_file: cstring) -> (^Log, RifleError) {
-	if log_file != nil {
-		// Load & initialise from file
-		return nil, .UnimplementedError
-	}
 
 	// TODO: maybe don't want to hard error on file, cache size issue but just round to nearest pssible value
-	if config.log_path == nil || len(config.log_path) == 0 || config.record_size <= 0 {
+	// Maybe move these
+	if log_file == nil && (config.log_path == nil || len(config.log_path) == 0 || config.schema.record_size <= 0 || len(config.schema.fields) == 0) {
 		return nil, .InvalidArgError
 	}
 	if config.page_size_bytes < 4096 || config.page_size_bytes > i64(max(i32)) || bits.count_ones(config.page_size_bytes) != 1 {
@@ -109,8 +105,8 @@ log_init :: proc(config: LogConfig, log_file: cstring) -> (^Log, RifleError) {
 	context.allocator = virtual.arena_allocator(&log.arena)
 
 	log.config = config
-	log.record_size = log.config.record_size
 
+	// For now use this path even if load from file but maybe swap at some point
 	path, path_err := strings.clone_to_cstring(cast(string)config.log_path)
 	if path_err != nil {
 		return nil, .AllocatorError
@@ -128,9 +124,22 @@ log_init :: proc(config: LogConfig, log_file: cstring) -> (^Log, RifleError) {
 	}
 	log.dirfd = dirfd
 
-	file_err := write_base_file(log) // TODO: dont do on load log from file
-	if file_err != nil {
-		return nil, file_err
+	if log_file != nil {
+		log_metadata, err := read_base_file(log_file)
+		if err != nil {
+			return nil, err
+		}
+		log.config.file_size_bytes = log_metadata.file_size
+		log.config.schema = log_metadata.schema
+		log.durable_index.value = log_metadata.head
+		log.trailing_index.value = log_metadata.tail
+		log.visible_index.value = log.durable_index.value
+		log.commited_index.value = log.durable_index.value
+	} else {
+		file_err := create_base_file(log)
+		if file_err != nil {
+			return nil, file_err
+		}
 	}
 
 	#partial switch ODIN_OS {

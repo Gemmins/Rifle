@@ -10,14 +10,18 @@ import "core:time"
 import rifle "rifle:rifle"
 
 System_Log :: struct {
-	log: ^rifle.Log,
-	path: string,
+	log:   ^rifle.Log,
+	path:  string,
 	cpath: cstring,
 }
 
 system_log_cleanup :: proc(ctx: rawptr) {
 	s := cast(^System_Log)ctx
-	if s.log != nil {rifle.log_deinit(s.log)}
+	if s.log != nil {
+		schema := s.log.config.schema
+		rifle.log_deinit(s.log)
+		rifle.schema_destroy(schema)
+	}
 	if len(s.path) > 0 {os.remove_all(s.path)}
 	delete(s.cpath)
 	delete(s.path)
@@ -39,7 +43,9 @@ system_log_create :: proc(t: ^testing.T) -> ^System_Log {
 	s.cpath = cpath
 	config := rifle.DefaultLogConfig
 	config.log_path = cpath
-	config.record_size = 8
+	schema, _, schema_err := rifle.schema_create(8, []rifle.FieldDesc{{name = "value", type = .I64}})
+	extra_require(t, schema_err == .None)
+	config.schema = schema
 	config.page_size_bytes = 4096
 	config.cache_size_bytes = 4 * 4096
 	config.file_size_bytes = 2 * 4096
@@ -115,17 +121,18 @@ system_log_cache_uring_eviction_and_file_boundaries :: proc(t: ^testing.T) {
 	bytes, err := os.read_entire_file(path, context.allocator)
 	extra_require(t, err == nil)
 	defer delete(bytes)
-	extra_require(t, len(bytes) == size_of(rifle.BaseHeader))
-	header := (cast(^rifle.BaseHeader)raw_data(bytes))^
-	testing.expect(t, header.magic == [4]u8{'R', 'F', 'L', 'E'})
-	testing.expect(t, header.record_size == 8 && header.page_size_bytes == 4096 && header.file_size_bytes == 8192)
+	header, header_err := rifle.base_file_decode(bytes)
+	extra_require(t, header_err == nil)
+	defer rifle.schema_destroy(header.schema)
+	testing.expect(t, header.record_size == 8 && header.file_size == 8192)
+	testing.expect(t, header.schema.record_size == 8 && len(header.schema.fields) == 1)
 }
 
 System_Writer :: struct {
-	log: ^rifle.Log,
-	id: int,
+	log:     ^rifle.Log,
+	id:      int,
 	barrier: ^sync.Barrier,
-	err: rifle.RifleError,
+	err:     rifle.RifleError,
 }
 
 system_writer :: proc(t: ^thread.Thread) {
@@ -150,7 +157,11 @@ system_concurrent_log_cache_uring_writers :: proc(t: ^testing.T) {
 	writers: [4]System_Writer
 	threads: [4]^thread.Thread
 	for &w, i in writers {
-		w = {log = s.log, id = i, barrier = &barrier}
+		w = {
+			log     = s.log,
+			id      = i,
+			barrier = &barrier,
+		}
 		threads[i] = thread.create(system_writer)
 		threads[i].data = &w
 		thread.start(threads[i])
