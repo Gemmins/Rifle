@@ -1,7 +1,7 @@
 package main
 
-import "base:runtime"
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:sync"
@@ -9,7 +9,8 @@ import "core:thread"
 import "core:time"
 import rifle "rifle:rifle"
 
-RECORD_SIZE :: 8
+PAYLOAD_SIZE :: #config(PAYLOAD_SIZE, 8) // Bytes after the tracking value
+RECORD_SIZE :: size_of(i64) + PAYLOAD_SIZE
 PAGE_SIZE_BYTES :: #config(PAGE_SIZE_BYTES, 1 << 14)
 CACHE_SIZE_BYTES :: #config(CACHE_SIZE_BYTES, 1 << 26)
 FILE_SIZE_BYTES :: #config(FILE_SIZE_BYTES, 1 << 28)
@@ -22,6 +23,7 @@ READ_BATCH_SIZE :: #config(READ_BATCH_SIZE, 1 << 12) // Records per read call
 
 #assert(N_THREADS > 0 && RECORDS_PER_THREAD > 0)
 #assert(WRITE_BATCH_SIZE > 0 && READ_BATCH_SIZE > 0)
+#assert(PAYLOAD_SIZE > 0 && PAYLOAD_SIZE <= max(u32))
 
 Thread_Data :: struct {
 	m:           ^rifle.Log,
@@ -30,13 +32,14 @@ Thread_Data :: struct {
 
 write_thread :: proc(t: ^thread.Thread) {
 	data := cast(^Thread_Data)t.data
-	a, _ := runtime.make_aligned([]u8, RECORD_SIZE * min(WRITE_BATCH_SIZE, RECORDS_PER_THREAD), RECORD_SIZE)
+	a := make([]u8, RECORD_SIZE * min(WRITE_BATCH_SIZE, RECORDS_PER_THREAD))
 	defer delete(a)
 	append_errs := 0
 	for first := 0; first < RECORDS_PER_THREAD; {
 		batch := min(WRITE_BATCH_SIZE, RECORDS_PER_THREAD - first)
 		for j in 0 ..< batch {
-			(cast(^i64)&a[j * RECORD_SIZE])^ = i64(first + j)
+			value := i64(first + j)
+			copy(a[j * RECORD_SIZE:][:size_of(i64)], mem.ptr_to_bytes(&value))
 		}
 		_, err := rifle.log_write(data.m, a[:batch * RECORD_SIZE], i64(batch))
 		if err != nil {
@@ -83,7 +86,7 @@ bench_multi :: proc(l: ^rifle.Log, n: int) -> bool {
 	fmt.println("head after writes:", sync.atomic_load(&l.visible_index.value))
 
 	total_records := n * RECORDS_PER_THREAD
-	a, _ := runtime.make_aligned([]u8, RECORD_SIZE * min(READ_BATCH_SIZE, total_records), RECORD_SIZE)
+	a := make([]u8, RECORD_SIZE * min(READ_BATCH_SIZE, total_records))
 	defer delete(a)
 	start = time.now()._nsec
 	count: i64 = 0
@@ -92,7 +95,8 @@ bench_multi :: proc(l: ^rifle.Log, n: int) -> bool {
 	for first := 0; first < total_records; {
 		batch := min(READ_BATCH_SIZE, total_records - first)
 		for j in 0 ..< batch {
-			(cast(^i64)&a[j * RECORD_SIZE])^ = -1
+			value := i64(-1)
+			copy(a[j * RECORD_SIZE:][:size_of(i64)], mem.ptr_to_bytes(&value))
 		}
 		err := rifle.log_read(l, a[:batch * RECORD_SIZE], i64(first), i64(batch))
 		first += batch
@@ -101,7 +105,9 @@ bench_multi :: proc(l: ^rifle.Log, n: int) -> bool {
 			continue
 		}
 		for j in 0 ..< batch {
-			value := (cast(^i64)&a[j * RECORD_SIZE])^
+			// Byte copies also support payload sizes that leave records unaligned.
+			value: i64
+			copy(mem.ptr_to_bytes(&value), a[j * RECORD_SIZE:][:size_of(i64)])
 			if value == 0 do zero_reads += 1
 			count += value
 		}
@@ -129,7 +135,7 @@ main :: proc() {
 		os.exit(1)
 	}
 	defer delete(base_path)
-	// Use a fresh directory: reopening an existing log is not implemented yet.
+	// Use a fresh directory so each benchmark starts with an empty log.
 	path, path_err := os.make_directory_temp(base_path, "data-*", context.allocator)
 	if path_err != nil {
 		fmt.eprintfln("Error creating log directory: %v", path_err)
@@ -144,9 +150,22 @@ main :: proc() {
 	defer delete(cpath)
 	fmt.println("Log directory:", path)
 
+	schema, bad_field, schema_err := rifle.schema_create(
+		RECORD_SIZE,
+		[]rifle.FieldDesc{
+			{name = "value", type = .I64},
+			{name = "payload", type = .Bytes, offset = size_of(i64), size = PAYLOAD_SIZE},
+		},
+	)
+	if schema_err != .None {
+		fmt.eprintfln("Error creating record schema (field %v): %v", bad_field, schema_err)
+		os.exit(1)
+	}
+	defer rifle.schema_destroy(schema)
+
 	config := rifle.DefaultLogConfig
 	config.log_path = cpath
-	config.record_size = RECORD_SIZE
+	config.schema = schema
 	config.page_size_bytes = PAGE_SIZE_BYTES
 	config.cache_size_bytes = CACHE_SIZE_BYTES
 	config.file_size_bytes = FILE_SIZE_BYTES
