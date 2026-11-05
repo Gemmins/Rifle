@@ -31,6 +31,10 @@ PageCache :: struct {
 	sync_in_progress:   bool,
 	sync_pending_index: i64,
 	sync_index:         i64,
+	last_file_index:    i64, // Next file to unlink
+	unlink_path:        []u8,
+	unlink_pending:     bool,
+	drop_index:         i64, // Exclusive file index to unlink up to
 	durable_index:      ^i64,
 }
 
@@ -100,6 +104,7 @@ cache_init :: proc(
 	c.pageData = backing[:split_point]
 	c.base_path = strings.clone(strings.trim_right(base_path, "/"))
 	path_size := len(c.base_path) + 1 + len(DATA_PREFIX) + 20 + len(FILE_EXTENSION) + 1
+	c.unlink_path = make([]u8, path_size, context.allocator)
 	c.path_storage = make([]u8, num_pages * i64(path_size), context.allocator)
 	for &v, i in c.pages {
 		v.data = c.pageData[cast(i64)i * page_size:(cast(i64)i + 1) * page_size]
@@ -129,6 +134,7 @@ cache_deinit :: proc(ctx: rawptr) {
 	_ = delete(c.pageData)
 	_ = delete(c.sets)
 	_ = delete(c.path_storage)
+	_ = delete(c.unlink_path)
 	_ = delete(c.base_path)
 	_ = delete(c.io_completions)
 	free(c)
@@ -198,8 +204,6 @@ cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 		}
 		curr_page += 1
 	}
-
-
 }
 
 //Read a number of contiguous records
@@ -247,7 +251,6 @@ cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 		}
 		curr_page += 1
 	}
-
 }
 
 // Writes through target must have completed before requesting sync.
@@ -258,11 +261,14 @@ cache_sync :: proc(ctx: rawptr, target: i64) {
 	sync.atomic_store(&c.sync_pending, true)
 }
 
-// TODO: implement
 cache_drop :: proc(ctx: rawptr, index: i64) {
 	c := cast(^PageCache)ctx
-	// Need to track/use deleted file index/prefix here
-	c.io.unlink(c.io.data, {}, {})
+	if index <= 0 || index > max(i64) / c.record_size {return}
+	file_index := (index * c.record_size / c.page_size) / c.pages_per_file
+	for di := sync.atomic_load(&c.drop_index); file_index > di; di = sync.atomic_load(&c.drop_index) {
+		_, ok := sync.atomic_compare_exchange_strong(&c.drop_index, di, file_index)
+		if ok {break}
+	}
 }
 
 //Issue io and handle io completions
@@ -305,6 +311,15 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 					p.state = .Flushing
 					continue
 				}
+			}
+		}
+
+		drop_index := sync.atomic_load(&c.drop_index)
+		if !c.unlink_pending && c.last_file_index < drop_index {
+			path := fmt.bprintf(c.unlink_path[:len(c.unlink_path) - 1], "%s/%s%d%s", c.base_path, DATA_PREFIX, c.last_file_index, FILE_EXTENSION)
+			c.unlink_path[len(path)] = 0
+			if err := c.io.unlink(c.io.data, {op = .DELETE}, {id = c.last_file_index, path = cstring(raw_data(c.unlink_path))}); err == nil {
+				c.unlink_pending = true
 			}
 		}
 
@@ -371,6 +386,11 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 					sync.atomic_store(c.durable_index, c.sync_index)
 				}
 			case .DELETE:
+				c.unlink_pending = false
+				// ENOENT also means the requested file is gone
+				if ce.res == 0 || ce.res == -2 {
+					c.last_file_index += 1
+				}
 			}
 		}
 		return true, nil

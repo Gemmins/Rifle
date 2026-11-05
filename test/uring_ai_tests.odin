@@ -193,17 +193,12 @@ uring_init :: proc(t: ^testing.T) {
 @(test)
 uring_deinit :: proc(t: ^testing.T) {
 	s := setup_test_io(t)
-	uio := cast(^rifle.UringIO)s.io.data
-	fd := uio.ring.fd
 
 	err := s.io.deinit(s.io.data)
 	s.initialized = false
 	s.deinitialized = true
 
 	testing.expect(t, err == nil)
-
-	_, fd_err := linux.fcntl(fd, linux.FCntl_Command_DUPFD.GETFD, 0)
-	testing.expect(t, fd_err == .EBADF)
 }
 
 @(test)

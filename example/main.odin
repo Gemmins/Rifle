@@ -16,7 +16,7 @@ CACHE_SIZE_BYTES :: #config(CACHE_SIZE_BYTES, 1 << 26)
 FILE_SIZE_BYTES :: #config(FILE_SIZE_BYTES, 1 << 28)
 MAX_OPEN_FILES :: 64
 COMMIT_RING_SIZE :: #config(COMMIT_RING_SIZE, 1 << 8)
-RECORDS_PER_THREAD :: #config(RECORDS_PER_THREAD, 1 << 28)
+RECORDS_PER_THREAD :: #config(RECORDS_PER_THREAD, 1 << 26)
 N_THREADS :: #config(N_THREADS, 1)
 WRITE_BATCH_SIZE :: #config(WRITE_BATCH_SIZE, 1) // Records per write call
 READ_BATCH_SIZE :: #config(READ_BATCH_SIZE, 1 << 12) // Records per read call
@@ -152,10 +152,7 @@ main :: proc() {
 
 	schema, bad_field, schema_err := rifle.schema_create(
 		RECORD_SIZE,
-		[]rifle.FieldDesc{
-			{name = "value", type = .I64},
-			{name = "payload", type = .Bytes, offset = size_of(i64), size = PAYLOAD_SIZE},
-		},
+		[]rifle.FieldDesc{{name = "value", type = .I64}, {name = "payload", type = .Bytes, offset = size_of(i64), size = PAYLOAD_SIZE}},
 	)
 	if schema_err != .None {
 		fmt.eprintfln("Error creating record schema (field %v): %v", bad_field, schema_err)
