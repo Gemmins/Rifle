@@ -25,7 +25,7 @@ BaseFileData :: struct {
 	schema:      RecordSchema,
 }
 
-// On-disk header format. Little-endian.
+// On-disk header-file format. Little-endian.
 // - magic 4xu8
 // - version u32
 // - record_size i64

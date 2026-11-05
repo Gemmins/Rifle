@@ -15,7 +15,7 @@
 ** as extensions by SQLite should #include this file instead of 
 ** sqlite3.h.
 */
-package sqlite
+package sqlite_ext
 
 import "core:c"
 
@@ -75,8 +75,8 @@ Api_Routines :: struct {
 	complete16:             proc "c" (sql: rawptr) -> i32,
 	create_collation:       proc "c" (^Connection, cstring, i32, rawptr, proc "c" (rawptr, i32, rawptr, i32, rawptr) -> i32) -> Result_Code,
 	create_collation16:     proc "c" (^Connection, rawptr, i32, rawptr, proc "c" (rawptr, i32, rawptr, i32, rawptr) -> i32) -> Result_Code,
-	create_function:        proc "c" (_: ^Connection, _: cstring, _: i32, _: i32, _: rawptr, xFunc: proc "c" (^Context, i32, ^^Value), xStep: proc "c" (^Context, i32, ^^Value), xFinal: proc "c" (^Context)) -> Result_Code,
-	create_function16:      proc "c" (_: ^Connection, _: rawptr, _: i32, _: i32, _: rawptr, xFunc: proc "c" (^Context, i32, ^^Value), xStep: proc "c" (^Context, i32, ^^Value), xFinal: proc "c" (^Context)) -> Result_Code,
+	create_function:        proc "c" (_: ^Connection, _: cstring, _: i32, _: i32, _: rawptr, xFunc: proc "c" (^Context, i32, [^]^Value), xStep: proc "c" (^Context, i32, [^]^Value), xFinal: proc "c" (^Context)) -> Result_Code,
+	create_function16:      proc "c" (_: ^Connection, _: rawptr, _: i32, _: i32, _: rawptr, xFunc: proc "c" (^Context, i32, [^]^Value), xStep: proc "c" (^Context, i32, [^]^Value), xFinal: proc "c" (^Context)) -> Result_Code,
 	create_module:          proc "c" (^Connection, cstring, ^Module, rawptr) -> Result_Code,
 	data_count:             proc "c" (pStmt: ^Stmt) -> i32,
 	db_handle:              proc "c" (^Stmt) -> ^Connection,
@@ -85,14 +85,14 @@ Api_Routines :: struct {
 	errcode:                proc "c" (db: ^Connection) -> Result_Code,
 	errmsg:                 proc "c" (^Connection) -> cstring,
 	errmsg16:               proc "c" (^Connection) -> rawptr,
-	exec:                   proc "c" (^Connection, cstring, proc "c" (rawptr, i32, ^cstring, ^cstring) -> i32, rawptr, ^cstring) -> Result_Code,
+	exec:                   proc "c" (^Connection, cstring, proc "c" (rawptr, i32, [^]cstring, [^]cstring) -> i32, rawptr, ^cstring) -> Result_Code,
 	expired:                proc "c" (^Stmt) -> i32,
 	finalize:               proc "c" (pStmt: ^Stmt) -> Result_Code,
 	free:                   proc "c" (rawptr),
-	free_table:             proc "c" (result: ^cstring),
+	free_table:             proc "c" (result: [^]cstring),
 	get_autocommit:         proc "c" (^Connection) -> i32,
 	get_auxdata:            proc "c" (^Context, i32) -> rawptr,
-	get_table:              proc "c" (^Connection, cstring, ^^cstring, ^i32, ^i32, ^cstring) -> Result_Code,
+	get_table:              proc "c" (^Connection, cstring, ^[^]cstring, ^i32, ^i32, ^cstring) -> Result_Code,
 	global_recover:         proc "c" () -> Result_Code,
 	interruptx:             proc "c" (^Connection),
 	last_insert_rowid:      proc "c" (^Connection) -> i64,
@@ -200,7 +200,7 @@ Api_Routines :: struct {
 	backup_step:           proc "c" (^Backup, i32) -> Result_Code,
 	compileoption_get:     proc "c" (i32) -> cstring,
 	compileoption_used:    proc "c" (cstring) -> i32,
-	create_function_v2:    proc "c" (_: ^Connection, _: cstring, _: i32, _: i32, _: rawptr, xFunc: proc "c" (^Context, i32, ^^Value), xStep: proc "c" (^Context, i32, ^^Value), xFinal: proc "c" (^Context), xDestroy: proc "c" (rawptr)) -> Result_Code,
+	create_function_v2:    proc "c" (_: ^Connection, _: cstring, _: i32, _: i32, _: rawptr, xFunc: proc "c" (^Context, i32, [^]^Value), xStep: proc "c" (^Context, i32, [^]^Value), xFinal: proc "c" (^Context), xDestroy: proc "c" (rawptr)) -> Result_Code,
 	db_config:             proc "c" (^Connection, i32, #c_vararg ..any) -> Result_Code,
 	db_mutex:              proc "c" (^Connection) -> ^Mutex,
 	db_status:             proc "c" (^Connection, i32, ^i32, ^i32, i32) -> Result_Code,
@@ -299,7 +299,7 @@ Api_Routines :: struct {
 	str_value:      proc "c" (^Str) -> cstring,
 
 	/* Version 3.25.0 and later */
-	create_window_function: proc "c" (_: ^Connection, _: cstring, _: i32, _: i32, _: rawptr, xStep: proc "c" (^Context, i32, ^^Value), xFinal: proc "c" (^Context), xValue: proc "c" (^Context), xInv: proc "c" (^Context, i32, ^^Value), xDestroy: proc "c" (rawptr)) -> Result_Code,
+	create_window_function: proc "c" (_: ^Connection, _: cstring, _: i32, _: i32, _: rawptr, xStep: proc "c" (^Context, i32, [^]^Value), xFinal: proc "c" (^Context), xValue: proc "c" (^Context), xInv: proc "c" (^Context, i32, [^]^Value), xDestroy: proc "c" (rawptr)) -> Result_Code,
 
 	/* Version 3.26.0 and later */
 	normalized_sql: proc "c" (^Stmt) -> cstring,
@@ -309,7 +309,7 @@ Api_Routines :: struct {
 	value_frombind: proc "c" (^Value) -> i32,
 
 	/* Version 3.30.0 and later */
-	drop_modules: proc "c" (^Connection, ^cstring) -> Result_Code,
+	drop_modules: proc "c" (^Connection, [^]cstring) -> Result_Code,
 
 	/* Version 3.31.0 and later */
 	hard_heap_limit64: proc "c" (i64) -> i64,
@@ -319,7 +319,7 @@ Api_Routines :: struct {
 	filename_wal:      proc "c" (cstring) -> cstring,
 
 	/* Version 3.32.0 and later */
-	create_filename:      proc "c" (cstring, cstring, cstring, i32, ^cstring) -> cstring,
+	create_filename:      proc "c" (cstring, cstring, cstring, i32, [^]cstring) -> cstring,
 	free_filename:        proc "c" (cstring),
 	database_file_object: proc "c" (cstring) -> ^File,
 

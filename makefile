@@ -19,10 +19,15 @@ rdbg:
 run: debug
 	./bin/rifle
 
+vtab:
+	mkdir -p lib
+	odin build ./src/vtab $(COLLECTIONS) -out:./lib/rifle_vtab -vet -build-mode:shared -o:none -no-entry-point
+
 test:
 	mkdir -p bin
 	odin test ./test $(COLLECTIONS) -define:ODIN_TEST_ALWAYS_REPORT_MEMORY=true -define:ODIN_TEST_RANDOM_SEED=123 -out:./bin/test
 
 clean:
 	rm -rf bin
-	rm -rf example/idk
+	rm -rf lib
+	rm -rf example/data*
