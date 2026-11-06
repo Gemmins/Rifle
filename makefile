@@ -6,22 +6,22 @@ all: debug
 
 debug:
 	mkdir -p bin
-	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -debug -o:none
+	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -debug -o:none  -show-timings
 
 release:
 	mkdir -p bin
-	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -o:speed
+	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -o:speed -show-timings
 
 rdbg:
 	mkdir -p bin
-	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -debug -o:speed
+	odin build ./example $(COLLECTIONS) -out:./bin/rifle -vet -debug -o:speed -show-timings
 
 run: debug
 	./bin/rifle
 
 vtab:
 	mkdir -p lib
-	odin build ./src/vtab $(COLLECTIONS) -out:./lib/rifle_vtab -vet -build-mode:shared -o:none -no-entry-point
+	odin build ./src/vtab $(COLLECTIONS) -out:./lib/rifle_vtab -vet -build-mode:shared -o:none -no-entry-point -show-timings
 
 test:
 	mkdir -p bin

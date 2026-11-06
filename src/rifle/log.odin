@@ -231,7 +231,7 @@ log_drop :: proc(log: ^Log, index: i64) -> RifleError {
 
 // Progress the log state
 log_poll :: proc(log: ^Log) -> (bool, RifleError) {
-	return log.cache.poll(&log.cache.data)
+	return log.cache.poll(log.cache.data)
 }
 
 // Shold this block? If so should it poll? If not then do we bother returning anything?
@@ -240,6 +240,6 @@ log_sync :: proc(log: ^Log) -> i64 {
 	sync_index := sync.atomic_load(&log.visible_index.value)
 	// Check if someone submitted higher index?
 	// Maybe make cache return its sync index (make cache only set sync index if higher)
-	log.cache.sync(&log.cache.data, sync_index)
+	log.cache.sync(log.cache.data, sync_index)
 	return sync_index
 }
