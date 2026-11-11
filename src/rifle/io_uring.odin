@@ -9,11 +9,11 @@ import "core:sys/linux/uring"
 // TODO: Check read/write lenghts
 // TODO: Handle when SQ is full
 // TODO: Currently double iteration over file map during sync - implement something better
+// TODO: Change to use REGISTER_FILE_ALLOC_RANGE and IORING_FILE_INDEX_ALLOC for managing open files
 
 UringIO :: struct {
 	ring:            uring.Ring,
 	config:          UringConfig,
-	buffer:          []u8,
 	file_index:      FileIndex,
 	op_timeout:      linux.Time_Spec,
 	dirfd:           linux.Fd,
@@ -154,19 +154,23 @@ new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> IO {
 	return io
 }
 
-uring_init :: proc(ctx: rawptr, cache_buffer: []u8) -> RifleError {
+uring_init :: proc(ctx: rawptr, buffers: [][]u8) -> RifleError {
 	io := cast(^UringIO)ctx
+	iovecs, alloc_err := make([]Iovec, len(buffers), context.allocator)
+	if alloc_err != nil {return .AllocatorError}
+	for buffer, i in buffers {
+		iovecs[i] = {raw_data(buffer), uintptr(len(buffer))}
+	}
+	success := false
+	defer delete(iovecs)
 	io.op_timeout.time_sec = 60
 	err := uring.init(&io.ring, &io.config.params)
 	if err != nil {
 		return .GenericError
 	}
+	defer if !success {uring.destroy(&io.ring)}
 
-	io.buffer = cache_buffer
-
-	iovec := Iovec{raw_data(io.buffer), cast(uintptr)len(io.buffer)}
-
-	errno1 := linux.io_uring_register(io.ring.fd, linux.IO_Uring_Register_Opcode.REGISTER_BUFFERS, cast(rawptr)&iovec, 1)
+	errno1 := linux.io_uring_register(io.ring.fd, .REGISTER_BUFFERS, raw_data(iovecs), u32(len(iovecs)))
 	if errno1 != .NONE {
 		return .GenericError
 	}
@@ -190,6 +194,7 @@ uring_init :: proc(ctx: rawptr, cache_buffer: []u8) -> RifleError {
 		return .GenericError
 	}
 
+	success = true
 	return nil
 }
 
@@ -197,10 +202,6 @@ uring_deinit :: proc(ctx: rawptr) -> RifleError {
 	io := cast(^UringIO)ctx
 
 	err := linux.io_uring_register(io.ring.fd, linux.IO_Uring_Register_Opcode.UNREGISTER_BUFFERS, nil, 0)
-	if err != .NONE {
-		return .GenericError
-	}
-
 	uring.destroy(&io.ring)
 
 	_ = delete(io.file_index.file_descriptors)
@@ -209,6 +210,7 @@ uring_deinit :: proc(ctx: rawptr) -> RifleError {
 	stack_deinit(&io.file_index.slot_stack)
 	_ = free(io)
 
+	if err != .NONE {return .GenericError}
 	return nil
 }
 
@@ -343,6 +345,10 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 		return .FileNotReady
 	}
 
+	if exists {
+		check_sqe_space(&io.ring, 2) or_return
+	}
+
 	if !exists {
 		check_sqe_space(&io.ring, 4) or_return
 		registered: bool
@@ -377,7 +383,7 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 
 	ud.file_slot = file_slot
 	ud.op = .WRITE
-	sqe, ok := write_fixed(&io.ring, cast(u64)ud, cast(linux.Fd)file_slot, buffer, offset, 0)
+	sqe, ok := write_fixed(&io.ring, cast(u64)ud, cast(linux.Fd)file_slot, buffer, offset, 1)
 	if !ok {
 		return .GenericError
 	}
@@ -397,7 +403,7 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 	}
 	dirty_files := 0
 	for _, slot in io.file_index.file_map {
-		if io.file_index.slots[slot].state == .Dirty {
+		if io.file_index.slots[slot].state == .Dirty || io.file_index.slots[slot].state == .OpeningDirty {
 			dirty_files += 1
 		}
 	}
@@ -412,7 +418,7 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 	flags := linux.IO_Uring_Fsync_Flags{.DATASYNC}
 	first := true
 	for _, slot in io.file_index.file_map { 	// Maybe change way to get all slots
-		if io.file_index.slots[slot].state == .Dirty {
+		if io.file_index.slots[slot].state == .Dirty || io.file_index.slots[slot].state == .OpeningDirty {
 			ud.file_slot = slot
 			sqe, ok := uring.fsync(&io.ring, cast(u64)ud, cast(linux.Fd)slot, flags)
 			if !ok {
@@ -452,10 +458,9 @@ uring_unlink :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rif
 uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError) {
 	io := cast(^UringIO)ctx
 
-	if uring.sq_ready(&io.ring) > 0 {
-		_, err := uring.submit(&io.ring, 0)
-
-		if err != .NONE {
+	for uring.sq_ready(&io.ring) > 0 {
+		submitted, err := uring.submit(&io.ring, 0)
+		if err != .NONE || submitted == 0 {
 			return 0, .GenericError
 		}
 	}

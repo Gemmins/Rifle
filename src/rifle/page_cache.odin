@@ -7,7 +7,7 @@ import "core:sync"
 
 import "core:log"
 
-SET_ASSOC :: 4 // LRU impl requires 4
+//TODO: need to add file ref tracking so we can close file descriptors - currently we just leak these.
 //TODO: divide page pinning into sections as to not lock up all/many pages on read/write
 //TODO: handle file deletion responses
 //TODO: just a boatload of handling errors i guess
@@ -31,6 +31,10 @@ PageCache :: struct {
 	sync_in_progress:   bool,
 	sync_pending_index: i64,
 	sync_index:         i64,
+	last_file_index:    i64, // Next file to unlink
+	unlink_path:        []u8,
+	unlink_pending:     bool,
+	drop_index:         i64, // Exclusive file index to unlink up to
 	durable_index:      ^i64,
 }
 
@@ -100,6 +104,7 @@ cache_init :: proc(
 	c.pageData = backing[:split_point]
 	c.base_path = strings.clone(strings.trim_right(base_path, "/"))
 	path_size := len(c.base_path) + 1 + len(DATA_PREFIX) + 20 + len(FILE_EXTENSION) + 1
+	c.unlink_path = make([]u8, path_size, context.allocator)
 	c.path_storage = make([]u8, num_pages * i64(path_size), context.allocator)
 	for &v, i in c.pages {
 		v.data = c.pageData[cast(i64)i * page_size:(cast(i64)i + 1) * page_size]
@@ -118,20 +123,23 @@ cache_init :: proc(
 
 	c.io_completions = make([]IOCompletion, 128, context.allocator) //TODO: actual count
 	c.io = io
-	c.io.init(c.io.data, c.pageData)
+	// The legacy cache uses the same storage for both reads and writes.
+	c.io.init(c.io.data, [][]u8{c.pageData, c.pageData})
 
 	return nil
 }
 
-cache_deinit :: proc(ctx: rawptr) {
+cache_deinit :: proc(ctx: rawptr) -> RifleError {
 	c := cast(^PageCache)ctx
-	_ = c.io.deinit(c.io.data)
+	io_err := c.io.deinit(c.io.data)
 	_ = delete(c.pageData)
 	_ = delete(c.sets)
 	_ = delete(c.path_storage)
+	_ = delete(c.unlink_path)
 	_ = delete(c.base_path)
 	_ = delete(c.io_completions)
 	free(c)
+	return io_err
 }
 
 // Inclusive page bounds - empty range returns (0, -1).
@@ -153,10 +161,10 @@ cache_page_range :: proc(c: ^PageCache, start, count: i64) -> (min_page, max_pag
 	return (start * c.record_size) / c.page_size, ((start + count) * c.record_size - 1) / c.page_size
 }
 
-cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
+cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) -> RifleError {
 	c := cast(^PageCache)ctx
 	start_page, end_page := cache_page_range(c, start, count)
-	cache_acquire_write_pages(c, start_page, end_page)
+	cache_acquire_write_pages(c, start_page, end_page) or_return
 
 	write_start := start * c.record_size
 	write_end := (start + count) * c.record_size
@@ -193,20 +201,19 @@ cache_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 		}
 
 		if waiting {
-			_, _ = cache_poll(c) // TODO: handle poll errors
+			_ = cache_poll(c) or_return
 			continue
 		}
 		curr_page += 1
 	}
-
-
+	return nil
 }
 
 //Read a number of contiguous records
-cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
+cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) -> RifleError {
 	c := cast(^PageCache)ctx
 	start_page, end_page := cache_page_range(c, start, count)
-	cache_pin_read_pages(c, start_page, end_page)
+	cache_pin_read_pages(c, start_page, end_page) or_return
 
 	read_start := start * c.record_size
 	read_end := (start + count) * c.record_size
@@ -242,12 +249,12 @@ cache_read :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) {
 		cache_unlock_set(set)
 
 		if waiting {
-			_, _ = cache_poll(c) // TODO: handle poll errors
+			_ = cache_poll(c) or_return
 			continue
 		}
 		curr_page += 1
 	}
-
+	return nil
 }
 
 // Writes through target must have completed before requesting sync.
@@ -258,19 +265,23 @@ cache_sync :: proc(ctx: rawptr, target: i64) {
 	sync.atomic_store(&c.sync_pending, true)
 }
 
-// TODO: implement
 cache_drop :: proc(ctx: rawptr, index: i64) {
 	c := cast(^PageCache)ctx
-	// Need to track/use deleted file index/prefix here
-	c.io.unlink(c.io.data, {}, {})
+	if index <= 0 || index > max(i64) / c.record_size {return}
+	file_index := (index * c.record_size / c.page_size) / c.pages_per_file
+	for di := sync.atomic_load(&c.drop_index); file_index > di; di = sync.atomic_load(&c.drop_index) {
+		_, ok := sync.atomic_compare_exchange_strong(&c.drop_index, di, file_index)
+		if ok {break}
+	}
 }
 
 //Issue io and handle io completions
-cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
+cache_poll :: proc(ctx: rawptr) -> (polled: bool, poll_error: RifleError) {
 	c := cast(^PageCache)ctx
 	// If another thread in polling, return
 	if _, ok := sync.atomic_compare_exchange_strong(&c.polling, 0, 1); ok { 	//TODO: look at memory ordering
 		defer (sync.atomic_store(&c.polling, 0))
+		polled = true
 		for _, set_index in c.sets { 	//TODO: Track pages needing work
 			set := cache_lock_set(c, i64(set_index))
 			defer cache_unlock_set(set)
@@ -308,6 +319,15 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 			}
 		}
 
+		drop_index := sync.atomic_load(&c.drop_index)
+		if !c.unlink_pending && c.last_file_index < drop_index {
+			path := fmt.bprintf(c.unlink_path[:len(c.unlink_path) - 1], "%s/%s%d%s", c.base_path, DATA_PREFIX, c.last_file_index, FILE_EXTENSION)
+			c.unlink_path[len(path)] = 0
+			if err := c.io.unlink(c.io.data, {op = .DELETE}, {id = c.last_file_index, path = cstring(raw_data(c.unlink_path))}); err == nil {
+				c.unlink_pending = true
+			}
+		}
+
 		// Should be last op
 		if !c.sync_in_progress {
 			if _, pending := sync.atomic_compare_exchange_strong(&c.sync_pending, true, false); pending {
@@ -322,7 +342,7 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 		}
 
 		// Process IO completions, for each one, update state accordingly
-		n, _ := c.io.poll(c.io.data, c.io_completions)
+		n := c.io.poll(c.io.data, c.io_completions) or_return
 
 		for ce, _ in c.io_completions[:n] {
 			if ce.res < 0 {
@@ -371,6 +391,11 @@ cache_poll :: proc(ctx: rawptr) -> (bool, RifleError) {
 					sync.atomic_store(c.durable_index, c.sync_index)
 				}
 			case .DELETE:
+				c.unlink_pending = false
+				// ENOENT also means the requested file is gone
+				if ce.res == 0 || ce.res == -2 {
+					c.last_file_index += 1
+				}
 			}
 		}
 		return true, nil
@@ -434,7 +459,7 @@ cache_find_or_allocate_page :: proc(c: ^PageCache, set: ^Set(SET_ASSOC), page_in
 }
 
 @(private)
-cache_pin_read_pages :: proc(c: ^PageCache, start_page, end_page: i64) {
+cache_pin_read_pages :: proc(c: ^PageCache, start_page, end_page: i64) -> RifleError {
 	// TODO: acquire pages in chunks
 	for curr_page := start_page; curr_page <= end_page; {
 		set := cache_lock_set(c, curr_page % i64(len(c.sets)))
@@ -446,15 +471,16 @@ cache_pin_read_pages :: proc(c: ^PageCache, start_page, end_page: i64) {
 		cache_unlock_set(set)
 
 		if p == nil {
-			_, _ = cache_poll(c) // TODO: handle poll errors
+			_ = cache_poll(c) or_return
 			continue
 		}
 		curr_page += 1
 	}
+	return nil
 }
 
 @(private)
-cache_acquire_write_pages :: proc(c: ^PageCache, start_page, end_page: i64) {
+cache_acquire_write_pages :: proc(c: ^PageCache, start_page, end_page: i64) -> RifleError {
 	// TODO: acquire pages in chunks
 	for curr_page := start_page; curr_page <= end_page; {
 		set_index := curr_page % i64(len(c.sets))
@@ -467,9 +493,10 @@ cache_acquire_write_pages :: proc(c: ^PageCache, start_page, end_page: i64) {
 		}
 
 		if p == nil {
-			_, _ = cache_poll(c) // TODO: handle poll errors
+			_ = cache_poll(c) or_return
 			continue
 		}
 		curr_page += 1
 	}
+	return nil
 }

@@ -2,7 +2,7 @@ package rifle
 
 IO :: struct {
 	data:     rawptr,
-	init:     proc(ctx: rawptr, cache_buffer: []u8) -> RifleError,
+	init:     proc(ctx: rawptr, buffers: [][]u8) -> RifleError,
 	deinit:   proc(ctx: rawptr) -> RifleError,
 	open:     proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
 	close:    proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,

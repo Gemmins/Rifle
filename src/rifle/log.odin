@@ -2,7 +2,6 @@ package rifle
 
 import "base:runtime"
 import "core:math/bits"
-import "core:mem/virtual"
 import "core:strings"
 import "core:sync"
 import "core:sys/linux"
@@ -12,12 +11,14 @@ import "core:sys/linux/uring"
 
 // Don't copy after init :)
 Log :: struct {
-	arena:          virtual.Arena,
+	allocator:      runtime.Allocator,
+	arena:          ^FileBackedArena,
 	config:         LogConfig,
 	dirfd:          linux.Fd,
 	cache:          Cache,
 	io:             IO,
 	commit_mask:    u64,
+	memfd:          linux.Fd,
 	commit_ring:    []paddedValue(i64),
 	commited_index: paddedValue(i64),
 	visible_index:  paddedValue(i64),
@@ -90,19 +91,28 @@ log_init :: proc(config: LogConfig, log_file: cstring) -> (^Log, RifleError) {
 		return nil, .InvalidArgError
 	}
 
-	arena_size := config.cache_size_bytes + (1 << 16) // TODO: actually figure this out
-	log, error := virtual.arena_growing_bootstrap_new(Log, "arena", cast(uint)arena_size)
+	// TODO: bootstrap Log inside the file-backed arena.
+	allocator := context.allocator
+	log, error := new(Log, allocator)
 	if error != nil {
 		return nil, .AllocatorError
 	}
+	log.allocator = allocator
 	success := false
-	defer {
-		if !success {
-			arena := log.arena
-			virtual.arena_destroy(&arena)
-		}
+	defer if !success {free(log, allocator)}
+	memfd, errno := linux.memfd_create("something", {.CLOEXEC}) // TODO: name
+	if errno != .NONE {
+		return nil, .GenericError
 	}
-	context.allocator = virtual.arena_allocator(&log.arena)
+	defer if !success {linux.close(memfd)}
+	log.memfd = memfd
+	arena, arena_err := new_file_backed_arena(memfd, config.cache_size_bytes + (1 << 24))
+	if arena_err != nil {
+		return nil, arena_err
+	}
+	log.arena = cast(^FileBackedArena)arena.data
+	defer if !success {destroy_file_backed_arena(log.arena)}
+	context.allocator = arena
 
 	log.config = config
 
@@ -163,17 +173,18 @@ log_init :: proc(config: LogConfig, log_file: cstring) -> (^Log, RifleError) {
 
 // Free all resources held by the log
 log_deinit :: proc(log: ^Log) -> RifleError {
-	context.allocator = virtual.arena_allocator(&log.arena)
-	log.cache.deinit(log.cache.data)
+	defer free(log, log.allocator)
+	context.allocator = {file_backed_arena_proc, log.arena}
+	cache_err := log.cache.deinit(log.cache.data)
 
-	err := linux.close(log.dirfd)
-	if err != nil {
+	dir_err := linux.close(log.dirfd)
+	mem_err := linux.close(log.memfd)
+	arena_err := destroy_file_backed_arena(log.arena)
+	cache_err or_return
+	if dir_err != nil || mem_err != nil {
 		return .FileOperationError
 	}
-
-	arena := log.arena
-	virtual.arena_destroy(&arena)
-	return nil
+	return arena_err
 }
 
 // Read _count_ records from _index_ to _index + count_ into _buf_
@@ -181,14 +192,13 @@ log_read :: proc(log: ^Log, buf: []u8, index: i64, count: i64) -> RifleError {
 	if index + count > sync.atomic_load(&log.visible_index.value) || index < sync.atomic_load(&log.trailing_index.value) { 	// >= ?
 		return .IndexOutOfBoundsError
 	}
-	log.cache.read(log.cache.data, buf, index, count)
-	return nil
+	return log.cache.read(log.cache.data, buf, index, count)
 }
 
 // Write _count_ records from _data_ into the log
-log_write :: proc(log: ^Log, data: []u8, count: i64) -> (i64, RifleError) {
-	index := sync.atomic_add(&log.commited_index.value, count)
-	log.cache.write(log.cache.data, data, index, count)
+log_write :: proc(log: ^Log, data: []u8, count: i64) -> (index: i64, err: RifleError) {
+	index = sync.atomic_add(&log.commited_index.value, count)
+	log.cache.write(log.cache.data, data, index, count) or_return
 
 	next := index
 	to_commit := count
