@@ -32,7 +32,6 @@ BaseFileData :: struct {
 // - file_size i64
 // - head i64
 // - tail i64
-// - record_size i64
 // - num_schema_fields i64
 // - List of SchemaFields
 //   - name_length i64
@@ -59,7 +58,9 @@ base_file_encode :: proc(data: BaseFileData, allocator := context.allocator) -> 
 	}
 	defer delete(schema_bytes, allocator)
 	bytes, alloc_err := make([]u8, BASE_FILE_PREFIX_SIZE + len(schema_bytes), allocator)
-	if alloc_err != nil {return nil, .AllocatorError}
+	if alloc_err != nil {
+		return nil, .AllocatorError
+	}
 	copy(bytes[:4], "RFLE")
 	w := 4
 	put(bytes, &w, u32le(BASE_VERSION))
@@ -76,7 +77,9 @@ base_file_decode :: proc(bytes: []u8, allocator := context.allocator) -> (BaseFi
 		return {}, .InvalidFileFormatError
 	}
 	r := 4
-	if u32(get(bytes, &r, u32le)) != BASE_VERSION {return {}, .InvalidFileFormatError}
+	if u32(get(bytes, &r, u32le)) != BASE_VERSION {
+		return {}, .InvalidFileFormatError
+	}
 	data: BaseFileData
 	data.record_size = i64(get(bytes, &r, i64le))
 	data.file_size = i64(get(bytes, &r, i64le))
@@ -85,13 +88,15 @@ base_file_decode :: proc(bytes: []u8, allocator := context.allocator) -> (BaseFi
 	if data.record_size <= 0 || data.file_size <= 0 || data.tail < 0 || data.head < data.tail {
 		return {}, .InvalidFileFormatError
 	}
-	schema, schema_err := schema_decode(bytes[r:], allocator)
+	schema, schema_err := schema_decode(bytes[r:], data.record_size, allocator)
 	if schema_err != .None {
 		return {}, schema_err == .AllocatorError ? .AllocatorError : .InvalidFileFormatError
 	}
 	expected_size := BASE_FILE_PREFIX_SIZE + SCHEMA_PREAMBLE_SIZE
-	for field in schema.fields {expected_size += SCHEMA_FIELD_SIZE + len(field.name)}
-	if schema.record_size != data.record_size || len(bytes) != expected_size {
+	for field in schema.fields {
+		expected_size += SCHEMA_FIELD_SIZE + len(field.name)
+	}
+	if len(bytes) != expected_size {
 		schema_destroy(schema, allocator)
 		return {}, .InvalidFileFormatError
 	}
@@ -106,16 +111,22 @@ create_base_file :: proc(l: ^Log) -> RifleError {
 	path := strings.concatenate({string(l.config.log_path), PATH_SEPARATOR, BASE_FILENAME})
 	defer delete(path)
 	file, err := os.create(path)
-	if err != nil {return .FileOperationError}
+	if err != nil {
+		return .FileOperationError
+	}
 	defer os.close(file)
 	written, write_err := os.write(file, bytes)
-	if write_err != nil || written != len(bytes) {return .FileOperationError}
+	if write_err != nil || written != len(bytes) {
+		return .FileOperationError
+	}
 	return nil
 }
 
 read_base_file :: proc(path: cstring, allocator := context.allocator) -> (BaseFileData, RifleError) {
 	bytes, err := os.read_entire_file(string(path), allocator)
-	if err != nil {return {}, .FileOperationError}
+	if err != nil {
+		return {}, .FileOperationError
+	}
 	defer delete(bytes, allocator)
 	return base_file_decode(bytes, allocator)
 }

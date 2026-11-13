@@ -1,5 +1,6 @@
 package rifle
 
+import "core:fmt"
 import "core:sys/linux"
 import "core:sys/linux/uring"
 
@@ -10,6 +11,7 @@ import "core:sys/linux/uring"
 // TODO: Handle when SQ is full
 // TODO: Currently double iteration over file map during sync - implement something better
 // TODO: Change to use REGISTER_FILE_ALLOC_RANGE and IORING_FILE_INDEX_ALLOC for managing open files
+// TODO: custom formatter for fie paths
 
 UringIO :: struct {
 	ring:            uring.Ring,
@@ -17,6 +19,9 @@ UringIO :: struct {
 	file_index:      FileIndex,
 	op_timeout:      linux.Time_Spec,
 	dirfd:           linux.Fd,
+	header_fd:       linux.Fd,
+	header_dirty:    bool,
+	paths:           [][len(DATA_PREFIX) + 20 + len(FILE_EXTENSION) + 1]u8,
 	pending_syncs:   u32,
 	sync_completion: IOCompletion,
 	sync_pending:    bool,
@@ -71,15 +76,17 @@ UringOp :: enum u8 {
 	DELETE,
 	ALLOCATE,
 	TIMEOUT,
+	HEADER,
+	HEADER_SYNC,
 }
 
 
-get_file_slot :: proc(files: ^FileIndex, file: RifleFile) -> (u16, bool) {
-	return files.file_map[file.id]
+get_file_slot :: proc(files: ^FileIndex, file_index: i64) -> (u16, bool) {
+	return files.file_map[file_index]
 }
 
-register_file :: proc(files: ^FileIndex, file: RifleFile) -> (u16, bool) {
-	if _, exists := files.file_map[file.id]; exists {
+register_file :: proc(files: ^FileIndex, file_index: i64) -> (u16, bool) {
+	if _, exists := files.file_map[file_index]; exists {
 		return 0, false
 	}
 
@@ -93,9 +100,9 @@ register_file :: proc(files: ^FileIndex, file: RifleFile) -> (u16, bool) {
 		assert(files.slots[slot].state == .Empty)
 	}
 
-	files.file_map[file.id] = slot
+	files.file_map[file_index] = slot
 	files.slots[slot] = {
-		file_id = file.id,
+		file_id = file_index,
 	}
 
 	return slot, true
@@ -149,7 +156,19 @@ new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> IO {
 	uring_io := new(UringIO, context.allocator)
 	uring_io.config = config
 	uring_io.dirfd = dirfd
-	io := IO{rawptr(uring_io), uring_init, uring_deinit, uring_open, uring_close, uring_readat, uring_writeat, uring_sync, uring_unlink, uring_poll}
+	io := IO {
+		data         = uring_io,
+		init         = uring_init,
+		deinit       = uring_deinit,
+		open         = uring_open,
+		close        = uring_close,
+		read_at      = uring_readat,
+		write_at     = uring_writeat,
+		write_header = uring_write_header,
+		sync         = uring_sync,
+		unlink       = uring_unlink,
+		poll         = uring_poll,
+	}
 
 	return io
 }
@@ -157,7 +176,9 @@ new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> IO {
 uring_init :: proc(ctx: rawptr, buffers: [][]u8) -> RifleError {
 	io := cast(^UringIO)ctx
 	iovecs, alloc_err := make([]Iovec, len(buffers), context.allocator)
-	if alloc_err != nil {return .AllocatorError}
+	if alloc_err != nil {
+		return .AllocatorError
+	}
 	for buffer, i in buffers {
 		iovecs[i] = {raw_data(buffer), uintptr(len(buffer))}
 	}
@@ -168,7 +189,20 @@ uring_init :: proc(ctx: rawptr, buffers: [][]u8) -> RifleError {
 	if err != nil {
 		return .GenericError
 	}
-	defer if !success {uring.destroy(&io.ring)}
+	defer if !success {
+		uring.destroy(&io.ring)
+	}
+	{
+		assert(.SUBMIT_STABLE in io.ring.features)
+		assert(.SQPOLL not_in io.config.params.flags)
+	}
+	io.paths, alloc_err = make([][len(DATA_PREFIX) + 20 + len(FILE_EXTENSION) + 1]u8, len(io.ring.sq.sqes), context.allocator)
+	if alloc_err != nil {
+		return .AllocatorError
+	}
+	defer if !success {
+		delete(io.paths)
+	}
 
 	errno1 := linux.io_uring_register(io.ring.fd, .REGISTER_BUFFERS, raw_data(iovecs), u32(len(iovecs)))
 	if errno1 != .NONE {
@@ -194,6 +228,11 @@ uring_init :: proc(ctx: rawptr, buffers: [][]u8) -> RifleError {
 		return .GenericError
 	}
 
+	header_fd, header_err := linux.openat(io.dirfd, BASE_FILENAME, {.RDWR, .CLOEXEC}, {})
+	if header_err != .NONE {
+		return .FileOperationError
+	}
+	io.header_fd = header_fd
 	success = true
 	return nil
 }
@@ -203,24 +242,28 @@ uring_deinit :: proc(ctx: rawptr) -> RifleError {
 
 	err := linux.io_uring_register(io.ring.fd, linux.IO_Uring_Register_Opcode.UNREGISTER_BUFFERS, nil, 0)
 	uring.destroy(&io.ring)
+	header_err := linux.close(io.header_fd)
 
 	_ = delete(io.file_index.file_descriptors)
 	_ = delete(io.file_index.slots)
 	_ = delete(io.file_index.file_map)
 	stack_deinit(&io.file_index.slot_stack)
+	_ = delete(io.paths)
 	_ = free(io)
 
-	if err != .NONE {return .GenericError}
+	if err != .NONE || header_err != .NONE {
+		return .GenericError
+	}
 	return nil
 }
 
-uring_open :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError {
+uring_open :: proc(ctx: rawptr, user_data: IOUserData, file_index: i64) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
 	check_sqe_space(&io.ring, 3) or_return
 
-	file_slot, registered := register_file(&io.file_index, file)
+	file_slot, registered := register_file(&io.file_index, file_index)
 	if !registered {
 		return .GenericError
 	}
@@ -231,7 +274,7 @@ uring_open :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rifle
 		&io.ring,
 		cast(u64)ud,
 		io.dirfd,
-		file.path,
+		uring_file_path(io, file_index),
 		{.IRUSR, .IWUSR, .IRGRP, .IWGRP, .IROTH, .IWOTH},
 		{.CREAT, .DIRECT, .RDWR},
 		cast(u32)file_slot + 1,
@@ -255,11 +298,11 @@ uring_open :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rifle
 	return nil
 }
 
-uring_close :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError {
+uring_close :: proc(ctx: rawptr, user_data: IOUserData, file_index: i64) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
-	file_slot, exists := get_file_slot(&io.file_index, file)
+	file_slot, exists := get_file_slot(&io.file_index, file_index)
 	if !exists {
 		return .GenericError
 	}
@@ -284,28 +327,31 @@ uring_close :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> Rifl
 	return nil
 }
 
-uring_readat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError {
+uring_readat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file_index: i64) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
-	file_slot, exists := get_file_slot(&io.file_index, file)
+	file_slot, exists := get_file_slot(&io.file_index, file_index)
 	{
 		assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot read from a closing file")
 	}
 	if exists && (io.file_index.slots[file_slot].state == .Opening || io.file_index.slots[file_slot].state == .OpeningDirty) {
 		return .FileNotReady
 	}
+	if exists {
+		check_sqe_space(&io.ring, 2) or_return
+	}
 
 	if !exists {
 		check_sqe_space(&io.ring, 4) or_return
 		registered: bool
-		file_slot, registered = register_file(&io.file_index, file)
+		file_slot, registered = register_file(&io.file_index, file_index)
 		if !registered {
 			return .GenericError
 		}
 		ud.file_slot = file_slot
 		ud.op = .OPEN
-		open_sqe, open_ok := uring.openat(&io.ring, cast(u64)ud, io.dirfd, file.path, {}, {.DIRECT, .RDWR}, cast(u32)file_slot + 1)
+		open_sqe, open_ok := uring.openat(&io.ring, cast(u64)ud, io.dirfd, uring_file_path(io, file_index), {}, {.DIRECT, .RDWR}, cast(u32)file_slot + 1)
 		if !open_ok {
 			return .GenericError
 		}
@@ -333,11 +379,11 @@ uring_readat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u
 	return nil
 }
 
-uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError {
+uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file_index: i64) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
-	file_slot, exists := get_file_slot(&io.file_index, file)
+	file_slot, exists := get_file_slot(&io.file_index, file_index)
 	{
 		assert(!exists || io.file_index.slots[file_slot].state != .Closing, "cannot write to a closing file")
 	}
@@ -352,7 +398,7 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 	if !exists {
 		check_sqe_space(&io.ring, 4) or_return
 		registered: bool
-		file_slot, registered = register_file(&io.file_index, file)
+		file_slot, registered = register_file(&io.file_index, file_index)
 		if !registered {
 			return .GenericError
 		}
@@ -362,7 +408,7 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 			&io.ring,
 			cast(u64)ud,
 			io.dirfd,
-			file.path,
+			uring_file_path(io, file_index),
 			{.IRUSR, .IWUSR, .IRGRP, .IWGRP, .IROTH, .IWOTH}, //TODO: double check flags
 			{.DIRECT, .RDWR, .CREAT},
 			cast(u32)file_slot + 1,
@@ -394,6 +440,24 @@ uring_writeat :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: 
 	return nil
 }
 
+uring_write_header :: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8) -> RifleError {
+	io := cast(^UringIO)ctx
+	ud := cast(UringUserData)user_data
+
+	check_sqe_space(&io.ring, 2) or_return
+
+	ud.op = .HEADER
+	sqe, ok := write_fixed(&io.ring, cast(u64)ud, io.header_fd, buffer, BASE_FILE_PREFIX_SIZE - 2 * size_of(i64), 1)
+	if !ok {
+		return .GenericError
+	}
+	sqe.flags |= {.IO_LINK}
+	link_timeout(&io.ring, ud, &io.op_timeout, {}) or_return
+	io.header_dirty = true
+
+	return nil
+}
+
 uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
@@ -407,7 +471,7 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 			dirty_files += 1
 		}
 	}
-	check_sqe_space(&io.ring, 2 * dirty_files) or_return
+	check_sqe_space(&io.ring, 2 * (dirty_files + int(io.header_dirty))) or_return
 
 	ud.op = .SYNC
 	io.sync_completion = {
@@ -436,15 +500,32 @@ uring_sync :: proc(ctx: rawptr, user_data: IOUserData) -> RifleError {
 		}
 	}
 
+	if io.header_dirty {
+		ud.op = .HEADER_SYNC
+		sqe, ok := uring.fsync(&io.ring, cast(u64)ud, io.header_fd, flags)
+		if !ok {
+			return .GenericError
+		}
+		if first {
+			sqe.flags |= {.IO_DRAIN}
+		}
+		sqe.flags |= {.IO_LINK}
+		link_timeout(&io.ring, ud, &io.op_timeout, {}) or_return
+		io.header_dirty = false
+		io.pending_syncs += 1
+	}
+
 	return nil
 }
 
-uring_unlink :: proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError {
+uring_unlink :: proc(ctx: rawptr, user_data: IOUserData, file_index: i64) -> RifleError {
 	io := cast(^UringIO)ctx
 	ud := cast(UringUserData)user_data
 
+	check_sqe_space(&io.ring, 2) or_return
+
 	ud.op = .DELETE
-	sqe, ok := unlinkat(&io.ring, cast(u64)ud, io.dirfd, file.path, {})
+	sqe, ok := unlinkat(&io.ring, cast(u64)ud, io.dirfd, uring_file_path(io, file_index), {})
 	if !ok {
 		return .GenericError
 	}
@@ -491,7 +572,7 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 		slot := ud.file_slot
 
 		// Internal completions do not need file slot metadata.
-		if ud.op != .OPEN && ud.op != .TIMEOUT && ud.op != .DELETE {
+		if ud.op != .OPEN && ud.op != .TIMEOUT && ud.op != .DELETE && ud.op != .HEADER && ud.op != .HEADER_SYNC {
 			{
 				assert(int(slot) < len(io.file_index.slots))
 			}
@@ -520,6 +601,10 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 			completion.user_data.op = .WRITE
 			completions[j] = completion
 			j += 1
+		case .HEADER:
+			completion.user_data.op = .HEADER
+			completions[j] = completion
+			j += 1
 		case .SYNC:
 			{
 				assert(io.pending_syncs > 0)
@@ -530,6 +615,15 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 			}
 			if io.file_index.slots[slot].state == .Flushing {
 				io.file_index.slots[slot].state = (cqe.res == 0) ? .Open : .Dirty
+			}
+		case .HEADER_SYNC:
+			{
+				assert(io.pending_syncs > 0)
+			}
+			io.pending_syncs -= 1
+			if cqe.res < 0 {
+				io.sync_completion.res = cqe.res
+				io.header_dirty = true
 			}
 		case .DELETE:
 			completion.user_data.op = .DELETE
@@ -560,4 +654,13 @@ uring_poll :: proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError
 	}
 
 	return j, nil
+}
+
+// Needs SUBMIT_STABLE and no SQPOLL
+@(private)
+uring_file_path :: proc(io: ^UringIO, file_index: i64) -> cstring {
+	buffer := io.paths[io.ring.sq.sqe_tail & io.ring.sq.mask][:]
+	path := fmt.bprintf(buffer[:len(buffer) - 1], "%s%020d%s", DATA_PREFIX, file_index, FILE_EXTENSION)
+	buffer[len(path)] = 0
+	return cstring(raw_data(buffer))
 }

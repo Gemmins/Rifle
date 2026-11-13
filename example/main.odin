@@ -11,15 +11,16 @@ import rifle "rifle:rifle"
 
 PAYLOAD_SIZE :: #config(PAYLOAD_SIZE, 8) // Bytes after the tracking value
 RECORD_SIZE :: size_of(i64) + PAYLOAD_SIZE
-PAGE_SIZE_BYTES :: #config(PAGE_SIZE_BYTES, 1 << 14)
-CACHE_SIZE_BYTES :: #config(CACHE_SIZE_BYTES, 1 << 26)
-FILE_SIZE_BYTES :: #config(FILE_SIZE_BYTES, 1 << 28)
+PAGE_SIZE_BYTES :: #config(PAGE_SIZE_BYTES, 1 << 12)
+RING_SIZE_BYTES :: #config(RING_SIZE_BYTES, 1 << 26)
+PAGE_CACHE_SIZE_BYTES :: #config(PAGE_CACHE_SIZE_BYTES, 1 << 23)
+FILE_SIZE_BYTES :: #config(FILE_SIZE_BYTES, 1 << 32)
 MAX_OPEN_FILES :: 64
 COMMIT_RING_SIZE :: #config(COMMIT_RING_SIZE, 1 << 8)
 RECORDS_PER_THREAD :: #config(RECORDS_PER_THREAD, 1 << 28)
 N_THREADS :: #config(N_THREADS, 1)
 WRITE_BATCH_SIZE :: #config(WRITE_BATCH_SIZE, 1) // Records per write call
-READ_BATCH_SIZE :: #config(READ_BATCH_SIZE, 1 << 12) // Records per read call
+READ_BATCH_SIZE :: #config(READ_BATCH_SIZE, 1 << 7) // Records per read call
 
 #assert(N_THREADS > 0 && RECORDS_PER_THREAD > 0)
 #assert(WRITE_BATCH_SIZE > 0 && READ_BATCH_SIZE > 0)
@@ -122,7 +123,9 @@ bench_multi :: proc(l: ^rifle.Log, n: int) -> bool {
 	fmt.println("sum:     ", count)
 	fmt.println("expected:", expected)
 	for data in thread_data {
-		if data.append_errs != 0 {return false}
+		if data.append_errs != 0 {
+			return false
+		}
 	}
 	return read_errs == 0 && count == expected && zero_reads == n && sync.atomic_load(&l.visible_index.value) == i64(total_records)
 }
@@ -152,10 +155,7 @@ main :: proc() {
 
 	schema, bad_field, schema_err := rifle.schema_create(
 		RECORD_SIZE,
-		[]rifle.FieldDesc{
-			{name = "value", type = .I64},
-			{name = "payload", type = .Bytes, offset = size_of(i64), size = PAYLOAD_SIZE},
-		},
+		[]rifle.FieldDesc{{name = "value", type = .I64}, {name = "payload", type = .Bytes, offset = size_of(i64), size = PAYLOAD_SIZE}},
 	)
 	if schema_err != .None {
 		fmt.eprintfln("Error creating record schema (field %v): %v", bad_field, schema_err)
@@ -167,7 +167,8 @@ main :: proc() {
 	config.log_path = cpath
 	config.schema = schema
 	config.page_size_bytes = PAGE_SIZE_BYTES
-	config.cache_size_bytes = CACHE_SIZE_BYTES
+	config.ring_size_bytes = RING_SIZE_BYTES
+	config.page_cache_size_bytes = PAGE_CACHE_SIZE_BYTES
 	config.file_size_bytes = FILE_SIZE_BYTES
 	config.max_open_files = MAX_OPEN_FILES
 	config.commit_ring_size = COMMIT_RING_SIZE

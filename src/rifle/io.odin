@@ -4,12 +4,13 @@ IO :: struct {
 	data:     rawptr,
 	init:     proc(ctx: rawptr, buffers: [][]u8) -> RifleError,
 	deinit:   proc(ctx: rawptr) -> RifleError,
-	open:     proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
-	close:    proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
-	read_at:  proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
-	write_at: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file: RifleFile) -> RifleError,
+	open:     proc(ctx: rawptr, user_data: IOUserData, file_index: i64) -> RifleError,
+	close:    proc(ctx: rawptr, user_data: IOUserData, file_index: i64) -> RifleError,
+	read_at:  proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file_index: i64) -> RifleError,
+	write_at: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8, offset: u64, file_index: i64) -> RifleError,
+	write_header: proc(ctx: rawptr, user_data: IOUserData, buffer: []u8) -> RifleError,
 	sync:     proc(ctx: rawptr, user_data: IOUserData) -> RifleError,
-	unlink:   proc(ctx: rawptr, user_data: IOUserData, file: RifleFile) -> RifleError,
+	unlink:   proc(ctx: rawptr, user_data: IOUserData, file_index: i64) -> RifleError,
 	poll:     proc(ctx: rawptr, completions: []IOCompletion) -> (u32, RifleError),
 }
 
@@ -33,9 +34,5 @@ IOOperation :: enum u8 {
 	WRITE,
 	SYNC,
 	DELETE,
-}
-
-RifleFile :: struct {
-	id:   i64,
-	path: cstring,
+	HEADER,
 }

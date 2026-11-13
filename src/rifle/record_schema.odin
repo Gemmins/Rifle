@@ -183,15 +183,19 @@ is_valid_field_name :: proc(name: string) -> bool {
 	return true
 }
 
-// record_size i64, field_count i64
+// field_count i64
 // per field: name_length i64, name bytes, type u8, offset i64, size i64
-SCHEMA_PREAMBLE_SIZE :: 8 + 8
+SCHEMA_PREAMBLE_SIZE :: 8
 SCHEMA_FIELD_SIZE :: 8 + 1 + 8 + 8
 
 // Serialises a valid schema into a buffer
 schema_encode :: proc(s: RecordSchema, allocator := context.allocator) -> (data: []u8, err: SchemaError) {
-	if s.record_size <= 0 {return nil, .InvalidRecordSize}
-	if len(s.fields) == 0 {return nil, .NoFields}
+	if s.record_size <= 0 {
+		return nil, .InvalidRecordSize
+	}
+	if len(s.fields) == 0 {
+		return nil, .NoFields
+	}
 	size := SCHEMA_PREAMBLE_SIZE
 	for field in s.fields {
 		if len(field.name) > max(int) - size - SCHEMA_FIELD_SIZE {
@@ -211,7 +215,6 @@ schema_encode :: proc(s: RecordSchema, allocator := context.allocator) -> (data:
 		copy(buf[w^:], mem.ptr_to_bytes(&v))
 		w^ += size_of(T)
 	}
-	put(buf, &w, i64le(s.record_size))
 	put(buf, &w, i64le(len(s.fields)))
 	for field in s.fields {
 		put(buf, &w, i64le(len(field.name)))
@@ -225,7 +228,7 @@ schema_encode :: proc(s: RecordSchema, allocator := context.allocator) -> (data:
 }
 
 // Reads the serialised schema
-schema_decode :: proc(data: []u8, allocator := context.allocator) -> (s: RecordSchema, err: SchemaError) {
+schema_decode :: proc(data: []u8, record_size: i64, allocator := context.allocator) -> (s: RecordSchema, err: SchemaError) {
 	if len(data) < SCHEMA_PREAMBLE_SIZE {
 		return {}, .Truncated
 	}
@@ -237,7 +240,6 @@ schema_decode :: proc(data: []u8, allocator := context.allocator) -> (s: RecordS
 		r^ += size_of(T)
 		return v
 	}
-	record_size := i64(get(data, &r, i64le))
 	field_count := i64(get(data, &r, i64le))
 	if record_size <= 0 {
 		return {}, .InvalidRecordSize

@@ -230,7 +230,9 @@ rifleModule := sqlite.Module {
 @(export)
 sqlite3_riflevtab_init :: proc "c" (db: ^sqlite.Connection, pzErrMsg: ^cstring, api_routines: ^sqlite.Api_Routines) -> sqlite.Result_Code {
 	rc := sqlite.Result_Code.OK
-	if !sqlite.init_api(api_routines) {return .ERROR}
+	if !sqlite.init_api(api_routines) {
+		return .ERROR
+	}
 	rc = sqlite.create_module(db, "rifle", &rifleModule, nil)
 	return rc
 }
