@@ -9,18 +9,19 @@ import "core:thread"
 import "core:time"
 import rifle "rifle:rifle"
 
-PAYLOAD_SIZE :: #config(PAYLOAD_SIZE, 8) // Bytes after the tracking value
+PAYLOAD_SIZE :: #config(PAYLOAD_SIZE, 120) // Bytes after the tracking value
 RECORD_SIZE :: size_of(i64) + PAYLOAD_SIZE
 PAGE_SIZE_BYTES :: #config(PAGE_SIZE_BYTES, 1 << 12)
 RING_SIZE_BYTES :: #config(RING_SIZE_BYTES, 1 << 26)
-PAGE_CACHE_SIZE_BYTES :: #config(PAGE_CACHE_SIZE_BYTES, 1 << 23)
-FILE_SIZE_BYTES :: #config(FILE_SIZE_BYTES, 1 << 32)
+PAGE_CACHE_SIZE_BYTES :: #config(PAGE_CACHE_SIZE_BYTES, 1 << 24)
+FILE_SIZE_BYTES :: #config(FILE_SIZE_BYTES, 1 << 30)
 MAX_OPEN_FILES :: 64
 COMMIT_RING_SIZE :: #config(COMMIT_RING_SIZE, 1 << 8)
-RECORDS_PER_THREAD :: #config(RECORDS_PER_THREAD, 1 << 28)
+RECORDS_PER_THREAD :: #config(RECORDS_PER_THREAD, 1 << 25)
 N_THREADS :: #config(N_THREADS, 1)
 WRITE_BATCH_SIZE :: #config(WRITE_BATCH_SIZE, 1) // Records per write call
-READ_BATCH_SIZE :: #config(READ_BATCH_SIZE, 1 << 7) // Records per read call
+READ_BATCH_SIZE :: #config(READ_BATCH_SIZE, 1 << 8) // Records per read call
+SYNC_INTERVAL :: #config(SYNC_INTERVAL, 1 << 14) // Sync every n records per thread
 
 #assert(N_THREADS > 0 && RECORDS_PER_THREAD > 0)
 #assert(WRITE_BATCH_SIZE > 0 && READ_BATCH_SIZE > 0)
@@ -47,6 +48,9 @@ write_thread :: proc(t: ^thread.Thread) {
 			append_errs += 1
 		}
 		first += batch
+		if first % SYNC_INTERVAL == 0 {
+			rifle.log_sync(data.m)
+		}
 	}
 	if append_errs > 0 {
 		fmt.println("[writer] append errors:", append_errs)
