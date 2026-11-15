@@ -61,6 +61,9 @@ write_thread :: proc(t: ^thread.Thread) {
 		// if first % SYNC_INTERVAL == 0 {
 		// 	rifle.log_sync(data.m)
 		// }
+		if first * RECORD_SIZE % cast(int)(data.m.config.ring_size_bytes / 4) == 0 {
+			rifle.log_poll(data.m)
+		}
 	}
 	if append_errs > 0 {
 		fmt.println("[writer] append errors:", append_errs)
