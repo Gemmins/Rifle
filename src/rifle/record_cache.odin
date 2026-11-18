@@ -4,6 +4,7 @@ import "core:mem"
 import "core:sync"
 import "core:sys/linux"
 import "core:sys/posix"
+import "core:thread"
 
 COMPLETION_QUEUE_COUNT :: 128
 SET_ASSOC :: 4 // LRU impl requires 4
@@ -354,7 +355,7 @@ rc_write :: proc(ctx: rawptr, data: []u8, start: i64, count: i64) -> RifleError 
 		copy(cache.ring_data[ring_offset:ring_offset + byte_count], data[source_offset:source_offset + byte_count])
 
 		for next - sync.atomic_load_explicit(cache.visible_index, .Acquire) >= i64(len(cache.commit_ring)) {
-			_ = rc_poll(cache) or_return
+			thread.yield()
 		}
 		sync.atomic_store_explicit(&cache.commit_ring[u64(next) & commit_mask].value, chunk_end, .Release)
 

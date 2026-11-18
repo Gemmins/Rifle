@@ -1,4 +1,4 @@
-.PHONY: all debug release rdbg run test c test-c clean docs
+.PHONY: all debug release rdbg run test test-unit test-e2e c clean docs
 
 COLLECTIONS := -collection:rifle=./src
 
@@ -27,9 +27,18 @@ c:
 	mkdir -p lib
 	odin build ./bindings/c $(COLLECTIONS) -out:./lib/librifle.so -vet -build-mode:shared -o:speed -no-entry-point -no-bounds-check
 
-test:
+test: test-unit test-e2e
+
+test-unit:
 	mkdir -p bin
-	odin test ./test $(COLLECTIONS) -define:ODIN_TEST_ALWAYS_REPORT_MEMORY=true -define:ODIN_TEST_RANDOM_SEED=123 -out:./bin/test
+	odin test ./test/unit $(COLLECTIONS) -vet -define:ODIN_TEST_ALWAYS_REPORT_MEMORY=true -define:ODIN_TEST_RANDOM_SEED=123 -out:./bin/unit-tests
+	odin test ./bindings/c $(COLLECTIONS) -vet -define:ODIN_TEST_ALWAYS_REPORT_MEMORY=true -define:ODIN_TEST_RANDOM_SEED=123 -out:./bin/c-binding-unit-tests
+
+test-e2e: c
+	mkdir -p bin
+	odin test ./test/e2e $(COLLECTIONS) -vet -define:ODIN_TEST_ALWAYS_REPORT_MEMORY=true -define:ODIN_TEST_RANDOM_SEED=123 -define:ODIN_TEST_THREADS=1 -out:./bin/e2e-tests
+	cc -std=c11 -Wall -Wextra -Werror -I./bindings/c ./test/e2e/c_api_test.c -L./lib -lrifle -Wl,-rpath,'$$ORIGIN/../lib' -o ./bin/c-api-e2e-test
+	./bin/c-api-e2e-test
 
 docs:
 	mkdir -p /docs/html

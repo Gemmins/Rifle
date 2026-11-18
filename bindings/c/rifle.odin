@@ -30,6 +30,9 @@ rifle_log_init :: proc "c" (config: rifle.LogConfig, log_file: cstring, out_log:
 @(export)
 rifle_log_deinit :: proc "c" (log: ^rifle.Log) -> rifle.RifleError {
 	context = runtime.default_context()
+	if log == nil {
+		return .InvalidArgError
+	}
 	return rifle.log_deinit(log)
 }
 
@@ -42,8 +45,9 @@ rifle_log_read :: proc "c" (log: ^rifle.Log, buffer: [^]u8, buffer_size: uint, i
 @(export)
 rifle_log_read_acquire :: proc "c" (log: ^rifle.Log, index: i64, count: i64, out_buf: ^[^]u8) -> rifle.RifleError {
 	context = runtime.default_context()
+	out_buf^ = nil
 	buf, err := rifle.log_read_acquire(log, index, count)
-	if err != nil {
+	if err == nil {
 		out_buf^ = raw_data(buf)
 	}
 	return err
@@ -63,8 +67,8 @@ rifle_log_prefetch :: proc "c" (log: ^rifle.Log, index: i64, count: i64) -> rifl
 
 @(export)
 rifle_log_write :: proc "c" (log: ^rifle.Log, data: rawptr, data_size: uint, count: i64, out_index: ^i64) -> rifle.RifleError {
-	out_index^ = -1
 	context = runtime.default_context()
+	out_index^ = -1
 	index, err := rifle.log_write(log, ([^]u8)(data)[:int(data_size)], count)
 	if err == nil {
 		out_index^ = index
@@ -75,6 +79,8 @@ rifle_log_write :: proc "c" (log: ^rifle.Log, data: rawptr, data_size: uint, cou
 @(export)
 rifle_log_write_reserve :: proc "c" (log: ^rifle.Log, count: i64, out_index: ^i64, out_buf: ^[^]u8) -> rifle.RifleError {
 	context = runtime.default_context()
+	out_index^ = -1
+	out_buf^ = nil
 	index, buf, err := rifle.log_write_reserve(log, count)
 	if err == nil {
 		out_index^ = index
@@ -97,8 +103,8 @@ rifle_log_drop :: proc "c" (log: ^rifle.Log, index: i64) -> rifle.RifleError {
 
 @(export)
 rifle_log_poll :: proc "c" (log: ^rifle.Log, out_progress: ^bool) -> rifle.RifleError {
-	out_progress^ = false
 	context = runtime.default_context()
+	out_progress^ = false
 	progress, err := rifle.log_poll(log)
 	out_progress^ = progress
 	return err
@@ -106,8 +112,8 @@ rifle_log_poll :: proc "c" (log: ^rifle.Log, out_progress: ^bool) -> rifle.Rifle
 
 @(export)
 rifle_log_sync :: proc "c" (log: ^rifle.Log, out_index: ^i64) -> rifle.RifleError {
-	out_index^ = 0
 	context = runtime.default_context()
+	out_index^ = 0
 	out_index^ = rifle.log_sync(log)
 	return nil
 }
