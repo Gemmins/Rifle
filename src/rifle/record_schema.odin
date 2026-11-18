@@ -1,6 +1,5 @@
 package rifle
 
-import "core:mem"
 import "core:strings"
 
 
@@ -24,21 +23,11 @@ FieldType :: enum u8 {
 
 MAX_FIELD_NAME_LEN :: int(max(u16))
 
-// Field description passed to log_init from user
-// This should always be 24 bytes
-FieldDesc :: struct {
-	name:   cstring,
-	offset: u32, // byte offset within the record
-	size:   u32, // 0 unless bytes/text
-	type:   FieldType,
-	_pad:   [7]u8, // maybe just make FieldType a u64 insted
-}
-
 SchemaField :: struct {
 	name:   string,
 	type:   FieldType,
 	offset: i64,
-	size:   i64, // actual field size
+	size:   i64,
 }
 
 RecordSchema :: struct {
@@ -62,81 +51,69 @@ SchemaError :: enum {
 	Truncated,
 }
 
-schema_create :: proc(record_size: i64, descs: []FieldDesc, allocator := context.allocator) -> (s: RecordSchema, bad_field: int, err: SchemaError) {
-	bad_field = -1
-
+// Validates a schema
+schema_validate :: proc(record_size: i64, fields: []SchemaField) -> (bad_field: int, err: SchemaError) {
 	if record_size <= 0 {
-		return {}, -1, .InvalidRecordSize
+		return -1, .InvalidRecordSize
 	}
-	if len(descs) == 0 {
-		return {}, -1, .NoFields
+	if len(fields) <= 0 || raw_data(fields) == nil {
+		return -1, .NoFields
 	}
+	for field, i in fields {
+		width, sized := field_type_width(field.type)
+		if width == 0 && !sized {
+			return i, .InvalidType
+		}
+		size := sized ? field.size : width
+		if size <= 0 || !sized && field.size != 0 && field.size != width {
+			return i, .InvalidSize
+		}
+		if field.offset < 0 || field.offset > record_size || size > record_size - field.offset {
+			return i, .FieldOutOfBounds
+		}
+		if !is_valid_field_name(field.name) {
+			return i, .InvalidName
+		}
+		for previous in fields[:i] {
+			if strings.equal_fold(previous.name, field.name) {
+				return i, .DuplicateName
+			}
+			previous_width, previous_sized := field_type_width(previous.type)
+			previous_size := previous_sized ? previous.size : previous_width
+			if field.offset < previous.offset + previous_size && previous.offset < field.offset + size {
+				return i, .OverlappingFields
+			}
+		}
+	}
+	return -1, .None
+}
 
-	fields, alloc_err := make([]SchemaField, len(descs), allocator)
+// Creates a copy of a schema, along with validation
+schema_create :: proc(record_size: i64, input: []SchemaField, allocator := context.allocator) -> (s: RecordSchema, bad_field: int, err: SchemaError) {
+	bad_field, err = schema_validate(record_size, input)
+	if err != .None {
+		return
+	}
+	fields, alloc_err := make([]SchemaField, len(input), allocator)
 	if alloc_err != nil {
 		return {}, -1, .AllocatorError
 	}
 	defer if err != .None {
 		schema_destroy({record_size, fields}, allocator)
 	}
-
-	for desc, i in descs {
-		width, sized := field_type_width(desc.type)
-		if desc.type == .Invalid || width == 0 && !sized {
-			return {}, i, .InvalidType
-		}
-
-		size := i64(desc.size)
-		if sized {
-			if size == 0 {
-				return {}, i, .InvalidSize
-			}
-		} else {
-			if size != 0 && size != width {
-				return {}, i, .InvalidSize
-			}
-			size = width
-		}
-
-		offset := i64(desc.offset)
-		if offset + size > record_size {
-			return {}, i, .FieldOutOfBounds
-		}
-
-		name := string(desc.name)
-		if !is_valid_field_name(name) {
-			return {}, i, .InvalidName
-		}
-		for j in 0 ..< i {
-			if strings.equal_fold(fields[j].name, name) {
-				return {}, i, .DuplicateName
-			}
-		}
-
-		cloned, clone_err := strings.clone(name, allocator)
+	for field, i in input {
+		name, clone_err := strings.clone(field.name, allocator)
 		if clone_err != nil {
 			return {}, i, .AllocatorError
 		}
-
-		fields[i] = SchemaField {
-			name   = cloned,
-			type   = desc.type,
-			offset = offset,
-			size   = size,
+		fields[i] = field
+		fields[i].name = name
+		width, sized := field_type_width(field.type)
+		if !sized {
+			fields[i].size = width
 		}
 	}
-
-	for i in 0 ..< len(fields) {
-		a := fields[i]
-		for j in i + 1 ..< len(fields) {
-			b := fields[j]
-			if a.offset < b.offset + b.size && b.offset < a.offset + a.size {
-				return {}, j, .OverlappingFields
-			}
-		}
-	}
-
-	return RecordSchema{record_size = record_size, fields = fields}, -1, .None
+	return {record_size, fields}, -1, .None
 }
 
 schema_destroy :: proc(s: RecordSchema, allocator := context.allocator) {
@@ -144,6 +121,15 @@ schema_destroy :: proc(s: RecordSchema, allocator := context.allocator) {
 		delete(field.name, allocator)
 	}
 	delete(s.fields, allocator)
+}
+
+schema_arena_size :: proc(schema: RecordSchema) -> i64 {
+	size := i64(len(schema.fields)) * size_of(SchemaField)
+	size += align_of(SchemaField)
+	for field in schema.fields {
+		size += i64(len(field.name)) + align_of(u8)
+	}
+	return size
 }
 
 field_type_width :: proc(type: FieldType) -> (width: i64, sized: bool) {
@@ -165,7 +151,7 @@ field_type_width :: proc(type: FieldType) -> (width: i64, sized: bool) {
 }
 
 is_valid_field_name :: proc(name: string) -> bool {
-	if len(name) == 0 || len(name) > MAX_FIELD_NAME_LEN {
+	if len(name) <= 0 || len(name) > MAX_FIELD_NAME_LEN || raw_data(name) == nil {
 		return false
 	}
 	for c, i in name {
@@ -190,11 +176,9 @@ SCHEMA_FIELD_SIZE :: 8 + 1 + 8 + 8
 
 // Serialises a valid schema into a buffer
 schema_encode :: proc(s: RecordSchema, allocator := context.allocator) -> (data: []u8, err: SchemaError) {
-	if s.record_size <= 0 {
-		return nil, .InvalidRecordSize
-	}
-	if len(s.fields) == 0 {
-		return nil, .NoFields
+	_, err = schema_validate(s.record_size, s.fields)
+	if err != .None {
+		return nil, err
 	}
 	size := SCHEMA_PREAMBLE_SIZE
 	for field in s.fields {
@@ -210,11 +194,6 @@ schema_encode :: proc(s: RecordSchema, allocator := context.allocator) -> (data:
 	}
 
 	w: int
-	put :: proc(buf: []u8, w: ^int, value: $T) {
-		v := value
-		copy(buf[w^:], mem.ptr_to_bytes(&v))
-		w^ += size_of(T)
-	}
 	put(buf, &w, i64le(len(s.fields)))
 	for field in s.fields {
 		put(buf, &w, i64le(len(field.name)))
@@ -222,7 +201,8 @@ schema_encode :: proc(s: RecordSchema, allocator := context.allocator) -> (data:
 		w += len(field.name)
 		put(buf, &w, u8(field.type))
 		put(buf, &w, i64le(field.offset))
-		put(buf, &w, i64le(field.size))
+		width, sized := field_type_width(field.type)
+		put(buf, &w, i64le(sized ? field.size : width))
 	}
 	return buf, .None
 }
@@ -234,12 +214,6 @@ schema_decode :: proc(data: []u8, record_size: i64, allocator := context.allocat
 	}
 
 	r: int
-	get :: proc(data: []u8, r: ^int, $T: typeid) -> T {
-		v: T
-		copy(mem.ptr_to_bytes(&v), data[r^:][:size_of(T)])
-		r^ += size_of(T)
-		return v
-	}
 	field_count := i64(get(data, &r, i64le))
 	if record_size <= 0 {
 		return {}, .InvalidRecordSize
@@ -258,8 +232,7 @@ schema_decode :: proc(data: []u8, record_size: i64, allocator := context.allocat
 	defer if err != .None {
 		schema_destroy({record_size, fields}, allocator)
 	}
-
-	for &field, i in fields {
+	for &field in fields {
 		if len(data) - r < SCHEMA_FIELD_SIZE {
 			return {}, .Truncated
 		}
@@ -276,32 +249,21 @@ schema_decode :: proc(data: []u8, record_size: i64, allocator := context.allocat
 		field.offset = i64(get(data, &r, i64le))
 		field.size = i64(get(data, &r, i64le))
 
-		width, sized := field_type_width(field.type)
-		if width == 0 && !sized {
-			return {}, .InvalidType
-		}
-		if field.size <= 0 || !sized && field.size != width {
-			return {}, .InvalidSize
-		}
-		if field.offset < 0 || field.offset > record_size || field.size > record_size - field.offset {
-			return {}, .FieldOutOfBounds
-		}
-		if !is_valid_field_name(name) {
-			return {}, .InvalidName
-		}
-		for previous in fields[:i] {
-			if strings.equal_fold(previous.name, name) {
-				return {}, .DuplicateName
-			}
-			if field.offset < previous.offset + previous.size && previous.offset < field.offset + field.size {
-				return {}, .OverlappingFields
-			}
-		}
 		cloned, clone_err := strings.clone(name, allocator)
 		if clone_err != nil {
 			return {}, .AllocatorError
 		}
 		field.name = cloned
+	}
+	_, err = schema_validate(record_size, fields)
+	if err != .None {
+		return {}, err
+	}
+	for &field in fields {
+		width, sized := field_type_width(field.type)
+		if !sized {
+			field.size = width
+		}
 	}
 	return {record_size, fields}, .None
 }

@@ -104,7 +104,8 @@ base_file_decode :: proc(bytes: []u8, allocator := context.allocator) -> (BaseFi
 	return data, nil
 }
 
-create_base_file :: proc(l: ^Log) -> RifleError {
+create_base_file :: proc(l: ^Log, allocator := context.allocator) -> RifleError {
+	context.allocator = allocator
 	schema := l.config.schema
 	bytes := base_file_encode({record_size = schema.record_size, file_size = l.config.file_size_bytes, schema = schema}) or_return
 	defer delete(bytes)

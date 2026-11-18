@@ -142,7 +142,6 @@ eof :: proc "c" (pCursor: ^sqlite.Vtab_Cursor) -> i32 {
 }
 
 column :: proc "c" (pCursor: ^sqlite.Vtab_Cursor, pContext: ^sqlite.Context, N: i32) -> i32 {
-	context = runtime.default_context()
 	cursor := cast(^Cursor)pCursor
 	vtab := cast(^Vtab)cursor.pVtab
 	field := vtab.log_data.schema.fields[N]

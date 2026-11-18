@@ -1,6 +1,6 @@
 package rifle
 
-paddedValue :: struct($T: typeid) #align (64) {
+paddedValue :: struct($T: typeid, $alignment: int) #align (alignment) {
 	value: T,
-	_:     [64 - size_of(T)]u8,
+	_:     [alignment - size_of(T)]u8,
 }

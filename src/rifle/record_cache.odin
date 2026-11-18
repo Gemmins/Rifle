@@ -13,7 +13,7 @@ RecordCache :: struct {
 	ring_mask:            i64,
 	header_data:          []u8,
 	header_in_progress:   bool,
-	commit_ring:          []paddedValue(i64),
+	commit_ring:          []paddedValue(i64, 128),
 	writes:               []RecordCacheWrite,
 	write_head:           i64,
 	write_count:          i64,
@@ -174,7 +174,7 @@ rc_init :: proc(
 		}
 	}
 
-	cache.commit_ring, err = make([]paddedValue(i64), commit_ring_size, context.allocator)
+	cache.commit_ring, err = make([]paddedValue(i64, 128), commit_ring_size, context.allocator)
 	if err != nil {
 		return .AllocatorError
 	}
@@ -655,4 +655,25 @@ rc_lock_set :: proc(cache: ^RecordCache, index: i64) -> ^RecordCacheSet(SET_ASSO
 @(private)
 rc_unlock_set :: proc(set: ^RecordCacheSet(SET_ASSOC)) {
 	sync.atomic_store_explicit(&set.lock, 0, .Release)
+}
+
+record_cache_arena_size :: proc(ring_size, cache_size, page_size, commit_ring_size: i64) -> i64 {
+	num_pages := cache_size / page_size
+	return(
+		size_of(RecordCache) +
+		align_of(RecordCache) +
+		2 * ring_size +
+		2 * size_of(i64) +
+		cache_size +
+		i64(posix.sysconf(._PAGE_SIZE)) +
+		num_pages * size_of(RecordCachePage) +
+		num_pages / SET_ASSOC * size_of(RecordCacheSet(SET_ASSOC)) +
+		align_of(RecordCacheSet(SET_ASSOC)) +
+		commit_ring_size * size_of(paddedValue(i64, 128)) +
+		align_of(paddedValue(i64, 128)) +
+		COMPLETION_QUEUE_COUNT * size_of(RecordCacheWrite) +
+		align_of(RecordCacheWrite) +
+		8 * size_of(RecordCacheUnlink) +
+		align_of(RecordCacheUnlink) \
+	)
 }

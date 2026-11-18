@@ -9,7 +9,7 @@ import "core:thread"
 import "core:time"
 import rifle "rifle:rifle"
 
-PAYLOAD_SIZE :: #config(PAYLOAD_SIZE, 8) // Bytes after the tracking value
+PAYLOAD_SIZE :: #config(PAYLOAD_SIZE, 0) // Bytes after the tracking value
 RECORD_SIZE :: size_of(i64) + PAYLOAD_SIZE
 PAGE_SIZE_BYTES :: #config(PAGE_SIZE_BYTES, 1 << 12)
 RING_SIZE_BYTES :: #config(RING_SIZE_BYTES, 1 << 26)
@@ -26,7 +26,7 @@ SYNC_INTERVAL :: #config(SYNC_INTERVAL, 1 << 14) // Sync every n records per thr
 
 #assert(N_THREADS > 0 && N_READ_THREADS > 0 && RECORDS_PER_THREAD > 0)
 #assert(WRITE_BATCH_SIZE > 0 && READ_BATCH_SIZE > 0)
-#assert(PAYLOAD_SIZE > 0 && PAYLOAD_SIZE <= max(u32))
+#assert(PAYLOAD_SIZE >= 0 && PAYLOAD_SIZE <= max(u32))
 
 Thread_Data :: struct {
 	m:           ^rifle.Log,
@@ -220,19 +220,18 @@ main :: proc() {
 	defer delete(cpath)
 	fmt.println("Log directory:", path)
 
-	schema, bad_field, schema_err := rifle.schema_create(
-		RECORD_SIZE,
-		[]rifle.FieldDesc{{name = "value", type = .I64}, {name = "payload", type = .Bytes, offset = size_of(i64), size = PAYLOAD_SIZE}},
-	)
-	if schema_err != .None {
-		fmt.eprintfln("Error creating record schema (field %v): %v", bad_field, schema_err)
-		os.exit(1)
-	}
-	defer rifle.schema_destroy(schema)
-
 	config := rifle.DefaultLogConfig
 	config.log_path = cpath
-	config.schema = schema
+	config.schema = {
+		record_size = RECORD_SIZE,
+		fields      = []rifle.SchemaField{{name = "value", type = .I64}},
+	}
+	when PAYLOAD_SIZE > 0 {
+		config.schema.fields = []rifle.SchemaField {
+			{name = "value", type = .I64},
+			{name = "payload", type = .Bytes, offset = size_of(i64), size = PAYLOAD_SIZE},
+		}
+	}
 	config.page_size_bytes = PAGE_SIZE_BYTES
 	config.ring_size_bytes = RING_SIZE_BYTES
 	config.page_cache_size_bytes = PAGE_CACHE_SIZE_BYTES

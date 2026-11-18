@@ -1,5 +1,6 @@
 package rifle
 
+import "base:runtime"
 import "core:fmt"
 import "core:sys/linux"
 import "core:sys/linux/uring"
@@ -80,78 +81,6 @@ UringOp :: enum u8 {
 	HEADER_SYNC,
 }
 
-
-get_file_slot :: proc(files: ^FileIndex, file_index: i64) -> (u16, bool) {
-	return files.file_map[file_index]
-}
-
-register_file :: proc(files: ^FileIndex, file_index: i64) -> (u16, bool) {
-	if _, exists := files.file_map[file_index]; exists {
-		return 0, false
-	}
-
-	slot, ok := stack_pop(&files.slot_stack)
-	if !ok {
-		return 0, false
-	}
-
-	{
-		assert(u32(slot) < (1 << 12))
-		assert(files.slots[slot].state == .Empty)
-	}
-
-	files.file_map[file_index] = slot
-	files.slots[slot] = {
-		file_id = file_index,
-	}
-
-	return slot, true
-}
-
-remove_file :: proc(files: ^FileIndex, slot: u16) {
-	entry := &files.slots[slot]
-	file_id := entry.file_id
-
-	{
-		when !ODIN_DISABLE_ASSERT {
-			mapped_slot, exists := files.file_map[file_id]
-			assert(exists && mapped_slot == slot)
-		}
-	}
-	_, _ = delete_key(&files.file_map, file_id)
-	entry^ = {}
-
-	returned := stack_push(&files.slot_stack, slot)
-	{
-		assert(returned)
-	}
-}
-
-check_sqe_space :: proc(ring: ^uring.Ring, n: int) -> RifleError {
-	if n > len(ring.sq.sqes) - int(uring.sq_ready(ring)) {
-		return .GenericError
-	}
-	return nil
-}
-
-link_timeout :: proc(
-	ring: ^uring.Ring,
-	user_data: UringUserData,
-	ts: ^linux.Time_Spec,
-	flags: linux.IO_Uring_Timeout_Flags,
-) -> (
-	^linux.IO_Uring_SQE,
-	RifleError,
-) {
-	ud := user_data
-	ud.op = .TIMEOUT
-	sqe, ok := uring.link_timeout(ring, cast(u64)ud, ts, flags)
-	if !ok {
-		return nil, .GenericError
-	}
-	return sqe, nil
-}
-
 new_uring_io :: proc(config: UringConfig, dirfd: linux.Fd) -> IO {
 	uring_io := new(UringIO, context.allocator)
 	uring_io.config = config
@@ -211,7 +140,7 @@ uring_init :: proc(ctx: rawptr, buffers: [][]u8) -> RifleError {
 
 	io.file_index.file_descriptors, _ = make([]linux.Fd, io.config.num_files, context.allocator)
 	io.file_index.slots, _ = make([]FileSlot, io.config.num_files, context.allocator)
-	io.file_index.file_map, _ = make(map[i64]u16, io.config.num_files, context.allocator)
+	io.file_index.file_map, _ = make(map[i64]u16, int(io.config.num_files) * 2, context.allocator) // Leave room so it never grows.
 	_ = stack_init(&io.file_index.slot_stack, cast(i64)io.config.num_files)
 	for i in 0 ..< io.config.num_files {
 		io.file_index.file_descriptors[i] = -1
@@ -663,4 +592,100 @@ uring_file_path :: proc(io: ^UringIO, file_index: i64) -> cstring {
 	path := fmt.bprintf(buffer[:len(buffer) - 1], "%s%020d%s", DATA_PREFIX, file_index, FILE_EXTENSION)
 	buffer[len(path)] = 0
 	return cstring(raw_data(buffer))
+}
+
+
+get_file_slot :: proc(files: ^FileIndex, file_index: i64) -> (u16, bool) {
+	return files.file_map[file_index]
+}
+
+register_file :: proc(files: ^FileIndex, file_index: i64) -> (u16, bool) {
+	if _, exists := files.file_map[file_index]; exists {
+		return 0, false
+	}
+
+	slot, ok := stack_pop(&files.slot_stack)
+	if !ok {
+		return 0, false
+	}
+
+	{
+		assert(u32(slot) < (1 << 12))
+		assert(files.slots[slot].state == .Empty)
+	}
+
+	files.file_map[file_index] = slot
+	files.slots[slot] = {
+		file_id = file_index,
+	}
+
+	return slot, true
+}
+
+remove_file :: proc(files: ^FileIndex, slot: u16) {
+	entry := &files.slots[slot]
+	file_id := entry.file_id
+
+	{
+		when !ODIN_DISABLE_ASSERT {
+			mapped_slot, exists := files.file_map[file_id]
+			assert(exists && mapped_slot == slot)
+		}
+	}
+	_, _ = delete_key(&files.file_map, file_id)
+	entry^ = {}
+
+	returned := stack_push(&files.slot_stack, slot)
+	{
+		assert(returned)
+	}
+}
+
+check_sqe_space :: proc(ring: ^uring.Ring, n: int) -> RifleError {
+	if n > len(ring.sq.sqes) - int(uring.sq_ready(ring)) {
+		return .GenericError
+	}
+	return nil
+}
+
+link_timeout :: proc(
+	ring: ^uring.Ring,
+	user_data: UringUserData,
+	ts: ^linux.Time_Spec,
+	flags: linux.IO_Uring_Timeout_Flags,
+) -> (
+	^linux.IO_Uring_SQE,
+	RifleError,
+) {
+	ud := user_data
+	ud.op = .TIMEOUT
+	sqe, ok := uring.link_timeout(ring, cast(u64)ud, ts, flags)
+	if !ok {
+		return nil, .GenericError
+	}
+	return sqe, nil
+}
+
+uring_io_arena_size :: proc(num_files: u16, num_entries, num_buffers: int) -> i64 {
+	map_capacity := uintptr(1) << runtime.MAP_MIN_LOG2_CAPACITY
+	for map_capacity < uintptr(num_files) * 2 {
+		map_capacity *= 2
+	}
+	map_size := i64(runtime.map_total_allocation_size(map_capacity, runtime.map_info(map[i64]u16)))
+	return(
+		size_of(UringIO) +
+		align_of(UringIO) +
+		i64(num_buffers) * size_of(Iovec) +
+		align_of(Iovec) +
+		i64(num_entries) * (len(DATA_PREFIX) + 20 + len(FILE_EXTENSION) + 1) +
+		1 +
+		i64(num_files) * size_of(linux.Fd) +
+		align_of(linux.Fd) +
+		i64(num_files) * size_of(FileSlot) +
+		align_of(FileSlot) +
+		map_size +
+		runtime.MAP_CACHE_LINE_SIZE +
+		i64(num_files) * size_of(u16) +
+		align_of(u16) \
+	)
 }

@@ -97,7 +97,7 @@ open_files :: proc(cursor: ^Cursor, min_index, max_index: i64) -> i32 {
 	return sqlite.OK
 }
 
-read_page_at :: proc(cursor: ^Cursor, page_index, file_size: i64) -> i32 {
+read_page_at :: proc "contextless" (cursor: ^Cursor, page_index, file_size: i64) -> i32 {
 	page_start := page_index * i64(len(cursor.current_page.data))
 	fd, found := cursor.files[page_start / file_size]
 	if !found {

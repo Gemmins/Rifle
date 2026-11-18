@@ -12,6 +12,17 @@ FileBackedArena :: struct {
 	allocator_head: i64,
 	allocator_tail: i64,
 	base:           [^]u8,
+	allocator_proc: proc(
+		allocator_data: rawptr,
+		mode: runtime.Allocator_Mode,
+		size, alignment: int,
+		old_memory: rawptr,
+		old_size: int,
+		location := #caller_location,
+	) -> (
+		data: []u8,
+		err: runtime.Allocator_Error,
+	),
 }
 
 file_backed_arena_proc :: proc(
@@ -43,10 +54,9 @@ file_backed_arena_proc :: proc(
 		arena.allocator_head += size
 		return
 	case .Free_All:
-		error := linux.munmap(arena.base, cast(uint)size)
-		if error != nil {
-			err = .Invalid_Argument
-		}
+		arena.allocator_head = 0
+		arena.allocator_tail = size
+		runtime.memset(arena.base, 0, cast(int)size)
 		return
 	case .Free, .Query_Features, .Query_Info, .Resize, .Resize_Non_Zeroed:
 		err = .Mode_Not_Implemented
@@ -64,7 +74,7 @@ alloc_from_end :: proc(arena: ^FileBackedArena, size: i64) -> ([]u8, runtime.All
 	return data, nil
 }
 
-new_file_backed_arena :: proc(file: linux.Fd, size: i64) -> (runtime.Allocator, RifleError) {
+file_backed_arena_bootstrap_by_name :: proc($T: typeid, $fieldName: string, file: linux.Fd, size: i64) -> (^T, RifleError) {
 	sys_page_size := posix.sysconf(._PAGE_SIZE)
 	if size % sys_page_size != 0 {
 		return {}, .GenericError
@@ -81,18 +91,19 @@ new_file_backed_arena :: proc(file: linux.Fd, size: i64) -> (runtime.Allocator, 
 		return {}, .GenericError
 	}
 
-	base, m_errno := linux.mmap(0, cast(uint)size, {.READ, .WRITE}, {.SHARED}, file, 0)
+	data, m_errno := linux.mmap(0, cast(uint)size, {.READ, .WRITE}, {.SHARED}, file, 0)
 	if m_errno != .NONE {
 		return {}, .GenericError
 	}
 
-	arena := FileBackedArena{file, size, 0, size, cast([^]u8)base}
+	offset := offset_of_by_string(T, fieldName)
+	arena := FileBackedArena{file, size, 0, size, cast([^]u8)data, file_backed_arena_proc}
+	arena.allocator_head += size_of(T)
 
-	a := cast(^FileBackedArena)base
-	a^ = arena
-	a.allocator_head += size_of(FileBackedArena)
+	(^FileBackedArena)(uintptr(data) + offset)^ = arena
 
-	return {file_backed_arena_proc, base}, nil
+	return cast(^T)data, nil
+
 }
 
 destroy_file_backed_arena :: proc(arena: ^FileBackedArena) -> RifleError {
