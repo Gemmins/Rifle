@@ -38,9 +38,9 @@ file_backed_arena_proc :: proc(
 ) {
 	arena := cast(^FileBackedArena)allocator_data
 	size := cast(i64)size
+	alignment := cast(i64)alignment
 
-	if alignment != 0 {
-		alignment := cast(i64)alignment
+	if alignment != 0 && arena.allocator_head % alignment != 0 {
 		thing := alignment - (arena.allocator_head % alignment)
 		arena.allocator_head += thing
 	}

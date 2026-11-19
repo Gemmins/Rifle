@@ -83,34 +83,43 @@ given_valid_schema_when_validated_then_no_field_is_rejected :: proc(t: ^testing.
 given_invalid_schemas_when_validated_then_precise_error_and_field_are_returned :: proc(t: ^testing.T) {
 	// Arrange
 	valid := rifle.SchemaField{name = "value", type = .U64, offset = 0}
+	cases := [?]struct {
+		name:               string,
+		record_size:        i64,
+		fields:             []rifle.SchemaField,
+		expected_bad_field: int,
+		expected_error:     rifle.SchemaError,
+	}{
+		{"record size", 0, []rifle.SchemaField{valid}, -1, .InvalidRecordSize},
+		{"empty fields", 8, nil, -1, .NoFields},
+		{"field type", 8, []rifle.SchemaField{{name = "value", type = .Invalid}}, 0, .InvalidType},
+		{"field name", 8, []rifle.SchemaField{{name = "bad name", type = .U64}}, 0, .InvalidName},
+		{"field size", 8, []rifle.SchemaField{{name = "value", type = .Bytes, size = 0}}, 0, .InvalidSize},
+		{"field bounds", 8, []rifle.SchemaField{{name = "value", type = .U64, offset = 1}}, 0, .FieldOutOfBounds},
+		{"duplicate name", 16, []rifle.SchemaField{valid, {name = "VALUE", type = .U64, offset = 8}}, 1, .DuplicateName},
+		{"overlap", 16, []rifle.SchemaField{valid, {name = "other", type = .U64, offset = 4}}, 1, .OverlappingFields},
+	}
 
-	// Act
-	bad_record, record_err := rifle.schema_validate(0, []rifle.SchemaField{valid})
-	bad_empty, empty_err := rifle.schema_validate(8, nil)
-	bad_type, type_err := rifle.schema_validate(8, []rifle.SchemaField{{name = "value", type = .Invalid}})
-	bad_name, name_err := rifle.schema_validate(8, []rifle.SchemaField{{name = "bad name", type = .U64}})
-	bad_size, size_err := rifle.schema_validate(8, []rifle.SchemaField{{name = "value", type = .Bytes, size = 0}})
-	bad_bounds, bounds_err := rifle.schema_validate(8, []rifle.SchemaField{{name = "value", type = .U64, offset = 1}})
-	bad_duplicate, duplicate_err := rifle.schema_validate(16, []rifle.SchemaField{valid, {name = "VALUE", type = .U64, offset = 8}})
-	bad_overlap, overlap_err := rifle.schema_validate(16, []rifle.SchemaField{valid, {name = "other", type = .U64, offset = 4}})
-
-	// Assert
-	testing.expect_value(t, bad_record, -1)
-	testing.expect_value(t, record_err, rifle.SchemaError.InvalidRecordSize)
-	testing.expect_value(t, bad_empty, -1)
-	testing.expect_value(t, empty_err, rifle.SchemaError.NoFields)
-	testing.expect_value(t, bad_type, 0)
-	testing.expect_value(t, type_err, rifle.SchemaError.InvalidType)
-	testing.expect_value(t, bad_name, 0)
-	testing.expect_value(t, name_err, rifle.SchemaError.InvalidName)
-	testing.expect_value(t, bad_size, 0)
-	testing.expect_value(t, size_err, rifle.SchemaError.InvalidSize)
-	testing.expect_value(t, bad_bounds, 0)
-	testing.expect_value(t, bounds_err, rifle.SchemaError.FieldOutOfBounds)
-	testing.expect_value(t, bad_duplicate, 1)
-	testing.expect_value(t, duplicate_err, rifle.SchemaError.DuplicateName)
-	testing.expect_value(t, bad_overlap, 1)
-	testing.expect_value(t, overlap_err, rifle.SchemaError.OverlappingFields)
+	// Act / Assert
+	for test_case in cases {
+		bad_field, err := rifle.schema_validate(test_case.record_size, test_case.fields)
+		testing.expectf(
+			t,
+			bad_field == test_case.expected_bad_field,
+			"%s: expected bad field %d, got %d",
+			test_case.name,
+			test_case.expected_bad_field,
+			bad_field,
+		)
+		testing.expectf(
+			t,
+			err == test_case.expected_error,
+			"%s: expected error %v, got %v",
+			test_case.name,
+			test_case.expected_error,
+			err,
+		)
+	}
 }
 
 @(test)

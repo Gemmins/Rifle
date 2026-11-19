@@ -1,4 +1,4 @@
-name: Deploy documentation
+name: Deploy documentation and coverage
 
 on:
   push:
@@ -13,7 +13,81 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      percent: ${{ steps.summary.outputs.percent }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Odin
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install kcov
+        env:
+          KCOV_VERSION: v43
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils-dev \
+            build-essential \
+            cmake \
+            libcurl4-openssl-dev \
+            libdw-dev \
+            libelf-dev \
+            libiberty-dev \
+            libssl-dev \
+            zlib1g-dev
+          git clone --depth 1 --branch "$KCOV_VERSION" \
+            https://github.com/SimonKagstrom/kcov.git "$RUNNER_TEMP/kcov"
+          cmake -S "$RUNNER_TEMP/kcov" -B "$RUNNER_TEMP/kcov-build" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/kcov-build" --parallel
+          sudo cmake --install "$RUNNER_TEMP/kcov-build"
+
+      - name: Generate coverage report
+        run: make coverage
+
+      - name: Report coverage
+        id: summary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = Path("coverage/kcov-merged/coverage.json")
+          data = json.loads(report.read_text())
+          percent = data["percent_covered"]
+          covered = data["covered_lines"]
+          total = data["total_lines"]
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"percent={percent}\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("## Coverage\n\n")
+              summary.write("| Line coverage | Covered lines | Total lines |\n")
+              summary.write("| ---: | ---: | ---: |\n")
+              summary.write(f"| **{percent}%** | {covered} | {total} |\n")
+
+          print(f"::notice title=Line coverage::{percent}% ({covered}/{total} lines)")
+          PY
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage
+          if-no-files-found: error
+          retention-days: 14
+
   deploy:
+    needs: coverage
     runs-on: ubuntu-latest
 
     steps:
@@ -29,6 +103,17 @@ jobs:
           doxygen Doxygen
           test -f docs/html/index.html
 
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-report
+          path: coverage
+
+      - name: Verify coverage artifact
+        run: |
+          test -f coverage/index.html
+          test -f coverage/kcov-merged/coverage.json
+
       - name: Configure SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -39,7 +124,7 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
 
-      - name: Upload documentation
+      - name: Upload documentation and coverage
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -47,4 +132,7 @@ jobs:
         run: |
           rsync -az --delete \
             -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes" \
-            docs/html/ "${VPS_USER}@${VPS_HOST}:${VPS_PATH}/"
+            docs/html/ "${VPS_USER}@${VPS_HOST}:${VPS_PATH}/docs/"
+          rsync -az --delete \
+            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes" \
+            coverage/ "${VPS_USER}@${VPS_HOST}:${VPS_PATH}/coverage/"

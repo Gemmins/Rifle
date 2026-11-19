@@ -92,7 +92,7 @@ given_failing_allocator_when_stack_is_initialized_then_initialization_reports_fa
 	context.allocator = original_allocator
 
 	// Assert
-	testing.expect(t, !ok)
+	testing.expect(t, ok != .None)
 	testing.expect_value(t, len(stack.data), 0)
 }
 

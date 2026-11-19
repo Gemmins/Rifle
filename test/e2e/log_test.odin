@@ -45,7 +45,7 @@ e2e_log_config :: proc(path: cstring, schema: rifle.RecordSchema) -> rifle.LogCo
 	return config
 }
 
-e2e_log_create :: proc(t: ^testing.T) -> ^E2E_Log {
+e2e_log_fixture :: proc(t: ^testing.T) -> ^E2E_Log {
 	testing.set_fail_timeout(t, 20 * time.Second)
 	fixture := new(E2E_Log)
 	testing.cleanup(t, e2e_log_cleanup, fixture)
@@ -57,6 +57,11 @@ e2e_log_create :: proc(t: ^testing.T) -> ^E2E_Log {
 	fixture.path = strings.clone_to_cstring(directory)
 	fixture.base = strings.concatenate({directory, "/", rifle.BASE_FILENAME})
 	fixture.base_path = strings.clone_to_cstring(fixture.base)
+	return fixture
+}
+
+e2e_log_create :: proc(t: ^testing.T) -> ^E2E_Log {
+	fixture := e2e_log_fixture(t)
 	fields := []rifle.SchemaField{{name = "value", type = .I64}}
 	config := e2e_log_config(fixture.path, {record_size = 8, fields = fields})
 	log, init_err := rifle.log_init(config, nil)
@@ -262,4 +267,73 @@ given_concurrent_writers_when_batches_are_appended_then_every_reserved_range_is_
 	testing.expect_value(t, fixture.log.visible_index.value, i64(2048))
 	testing.expect_value(t, fixture.log.persisted_index.value, i64(2048))
 	testing.expect_value(t, fixture.log.durable_index.value, i64(2048))
+}
+
+E2E_Wide_Record :: struct {
+	first:  i64,
+	second: i64,
+	third:  i64,
+}
+
+@(test)
+given_non_power_of_two_record_file_and_batch_sizes_when_partial_tail_is_synced_then_every_record_persists_and_reopens :: proc(t: ^testing.T) {
+	// Arrange
+	fixture := e2e_log_fixture(t)
+	fields := []rifle.SchemaField{
+		{name = "first", type = .I64, offset = 0},
+		{name = "second", type = .I64, offset = 8},
+		{name = "third", type = .I64, offset = 16},
+	}
+	config := e2e_log_config(fixture.path, {record_size = size_of(E2E_Wide_Record), fields = fields})
+	config.page_cache_size_bytes = 16 * 4096
+	config.file_size_bytes = 3 * 4096
+	config.max_open_files = 7
+	config.read_chunk_size = 3
+	log, init_err := rifle.log_init(config, nil)
+	if !testing.expect_value(t, init_err, rifle.RifleError.None) {
+		return
+	}
+	fixture.log = log
+	input: [777]E2E_Wide_Record
+	for &record, i in input {
+		record = {i64(i + 1), i64(i * 3 + 2), -i64(i + 7)}
+	}
+	input_bytes := (cast([^]u8)raw_data(input[:]))[:size_of(input)]
+
+	// Act
+	index, write_err := rifle.log_write(log, input_bytes, len(input))
+	e2e_sync(t, log)
+	first_read: [len(input)]E2E_Wide_Record
+	first_read_bytes := (cast([^]u8)raw_data(first_read[:]))[:size_of(first_read)]
+	first_read_err := rifle.log_read(log, first_read_bytes, 0, len(first_read))
+	close_err := rifle.log_deinit(log)
+	fixture.log = nil
+	config.schema = {}
+	reopened, reopen_err := rifle.log_init(config, fixture.base_path)
+	if !testing.expect_value(t, reopen_err, rifle.RifleError.None) {
+		return
+	}
+	fixture.log = reopened
+	second_read: [len(input)]E2E_Wide_Record
+	second_read_bytes := (cast([^]u8)raw_data(second_read[:]))[:size_of(second_read)]
+	second_read_err := rifle.log_read(reopened, second_read_bytes, 0, len(second_read))
+	metadata, metadata_err := rifle.read_base_file(fixture.base_path)
+	defer rifle.schema_destroy(metadata.schema)
+
+	// Assert
+	testing.expect_value(t, size_of(E2E_Wide_Record), 24)
+	testing.expect_value(t, write_err, rifle.RifleError.None)
+	testing.expect_value(t, index, i64(0))
+	testing.expect_value(t, first_read_err, rifle.RifleError.None)
+	testing.expect_value(t, first_read, input)
+	testing.expect_value(t, close_err, rifle.RifleError.None)
+	testing.expect_value(t, reopen_err, rifle.RifleError.None)
+	testing.expect_value(t, second_read_err, rifle.RifleError.None)
+	testing.expect_value(t, second_read, input)
+	testing.expect_value(t, reopened.config.file_size_bytes, i64(3 * 4096))
+	testing.expect_value(t, reopened.config.max_open_files, u16(7))
+	testing.expect_value(t, reopened.config.read_chunk_size, i64(3))
+	testing.expect_value(t, metadata_err, rifle.RifleError.None)
+	testing.expect_value(t, metadata.head, i64(len(input)))
+	testing.expect_value(t, metadata.tail, i64(0))
 }

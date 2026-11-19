@@ -58,9 +58,9 @@ write_thread :: proc(t: ^thread.Thread) {
 			append_errs += 1
 		}
 		first += batch
-		// if first % SYNC_INTERVAL == 0 {
-		// 	rifle.log_sync(data.m)
-		// }
+		if first % SYNC_INTERVAL == 0 {
+			rifle.log_sync(data.m)
+		}
 		if first * RECORD_SIZE % cast(int)(data.m.config.ring_size_bytes / 4) == 0 {
 			rifle.log_poll(data.m)
 		}
@@ -68,6 +68,7 @@ write_thread :: proc(t: ^thread.Thread) {
 	if append_errs > 0 {
 		fmt.println("[writer] append errors:", append_errs)
 	}
+	rifle.log_sync(data.m)
 	data.append_errs = append_errs
 }
 

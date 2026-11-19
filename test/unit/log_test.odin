@@ -76,6 +76,30 @@ given_valid_log_config_when_validated_then_no_error_is_returned :: proc(t: ^test
 }
 
 @(test)
+given_valid_non_power_of_two_configuration_values_when_validated_then_no_error_is_returned :: proc(t: ^testing.T) {
+	// Arrange
+	config := log_test_config()
+	config.page_cache_size_bytes = 16 * 4096
+	config.file_size_bytes = 3 * 4096
+	config.max_open_files = 7
+	config.read_chunk_size = 3
+	config.schema = {
+		record_size = 24,
+		fields = []rifle.SchemaField{
+			{name = "first", type = .I64, offset = 0},
+			{name = "second", type = .I64, offset = 8},
+			{name = "third", type = .I64, offset = 16},
+		},
+	}
+
+	// Act
+	err := rifle.log_config_validate(config)
+
+	// Assert
+	testing.expect_value(t, err, rifle.RifleError.None)
+}
+
+@(test)
 given_invalid_log_configs_when_validated_then_each_is_rejected :: proc(t: ^testing.T) {
 	// Arrange
 	valid := log_test_config()

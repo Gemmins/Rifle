@@ -71,6 +71,9 @@ disconnect :: proc "c" (pVTab: ^sqlite.Vtab) -> i32 {
 	context = runtime.default_context()
 	vtab := cast(^Vtab)pVTab
 
+	delete(vtab.log_path)
+	rifle.schema_destroy(vtab.log_data.schema)
+
 	err := free(vtab)
 	if err != nil {
 		return sqlite.ERROR

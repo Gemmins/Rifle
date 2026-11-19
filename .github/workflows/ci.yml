@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Odin
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: make debug vtab
+
+      - name: Package build artifacts
+        run: tar -czf rifle-linux-amd64.tar.gz bin/rifle lib/rifle_vtab.so
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: rifle-linux-amd64
+          path: rifle-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Odin
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests
+        run: make test

@@ -21,6 +21,11 @@ _Static_assert(_Alignof(RifleIndex) == 128, "RifleIndex alignment");
 _Static_assert(offsetof(RifleLog, config) == 640, "RifleLog.config offset");
 #endif
 
+enum {
+    RECORD_COUNT = 2051,
+    DATA_FILE_COUNT = 2,
+};
+
 int main(void) {
     char directory[] = "/tmp/rifle-c-e2e-XXXXXX";
     assert(mkdtemp(directory) != NULL);
@@ -37,9 +42,9 @@ int main(void) {
     config.log_path = directory;
     config.ring_size_bytes = INT64_C(1) << 16;
     config.page_cache_size_bytes = 4 * 4096;
-    config.file_size_bytes = 2 * 4096;
+    config.file_size_bytes = 3 * 4096;
     config.page_size_bytes = 4096;
-    config.max_open_files = 8;
+    config.max_open_files = 7;
     config.commit_ring_size = 64;
     config.schema.record_size = 8;
     config.schema.fields.data = &field;
@@ -49,17 +54,17 @@ int main(void) {
     assert(rifle_log_init(config, NULL, &log) == RIFLE_NONE);
     assert(log != NULL);
 
-    int64_t input[2048];
-    int64_t output[2048];
-    for (int64_t i = 0; i < 2048; ++i) input[i] = i + 1;
+    int64_t input[RECORD_COUNT];
+    int64_t output[RECORD_COUNT];
+    for (int64_t i = 0; i < RECORD_COUNT; ++i) input[i] = i + 1;
 
     int64_t index = -1;
-    assert(rifle_log_write(log, input, sizeof(input), 2048, &index) == RIFLE_NONE);
+    assert(rifle_log_write(log, input, sizeof(input), RECORD_COUNT, &index) == RIFLE_NONE);
     assert(index == 0);
 
     int64_t target = 0;
     assert(rifle_log_sync(log, &target) == RIFLE_NONE);
-    assert(target == 2048);
+    assert(target == RECORD_COUNT);
     for (int attempt = 0; attempt < 100000; ++attempt) {
         if (__atomic_load_n(&log->durable_index.value, __ATOMIC_ACQUIRE) >= target) break;
         bool progress = false;
@@ -69,7 +74,7 @@ int main(void) {
     assert(__atomic_load_n(&log->durable_index.value, __ATOMIC_ACQUIRE) == target);
 
     memset(output, 0, sizeof(output));
-    assert(rifle_log_read(log, output, sizeof(output), 0, 2048) == RIFLE_NONE);
+    assert(rifle_log_read(log, output, sizeof(output), 0, RECORD_COUNT) == RIFLE_NONE);
     assert(memcmp(input, output, sizeof(input)) == 0);
     assert(rifle_log_deinit(log) == RIFLE_NONE);
 
@@ -79,12 +84,12 @@ int main(void) {
     RifleLog *reopened = NULL;
     assert(rifle_log_init(config, base_path, &reopened) == RIFLE_NONE);
     memset(output, 0, sizeof(output));
-    assert(rifle_log_read(reopened, output, sizeof(output), 0, 2048) == RIFLE_NONE);
+    assert(rifle_log_read(reopened, output, sizeof(output), 0, RECORD_COUNT) == RIFLE_NONE);
     assert(memcmp(input, output, sizeof(input)) == 0);
     assert(rifle_log_deinit(reopened) == RIFLE_NONE);
 
     char data_path[512];
-    for (int file_id = 0; file_id < 2; ++file_id) {
+    for (int file_id = 0; file_id < DATA_FILE_COUNT; ++file_id) {
         assert(snprintf(data_path, sizeof(data_path), "%s/data_%020d.rfl", directory, file_id) > 0);
         assert(unlink(data_path) == 0);
     }

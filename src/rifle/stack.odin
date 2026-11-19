@@ -1,23 +1,29 @@
 package rifle
 
+import "base:runtime"
+
 // !NOT THREADSAFE! (Doesn't need to be)
 Stack :: struct($T: typeid) {
 	top:  i64,
 	data: []T,
 }
 
-stack_init :: proc(stack: ^Stack($T), size: i64) -> bool {
-	stack.data, _ = make([]T, size, context.allocator)
-	// if err != nil {
-	// 	return false
-	// }
-	// TODO: check i guesss
+stack_init :: proc(stack: ^Stack($T), size: i64) -> RifleError {
+	err: runtime.Allocator_Error
+	stack.data, err = make([]T, size, context.allocator)
+	if err != nil {
+		return .AllocatorError
+	}
 	stack.top = 0
-	return true
+	return nil
 }
 
-stack_deinit :: proc(stack: ^Stack($T)) {
-	delete(stack.data)
+stack_deinit :: proc(stack: ^Stack($T)) -> RifleError {
+	err := delete(stack.data)
+	if err != nil {
+		return .AllocatorError
+	}
+	return nil
 }
 
 stack_pop :: proc(stack: ^Stack($T)) -> (T, bool) {

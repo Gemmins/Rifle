@@ -1,6 +1,7 @@
-.PHONY: all debug release rdbg run test test-unit test-e2e c clean docs
+.PHONY: all debug release rdbg run test test-unit test-e2e coverage c clean docs
 
 COLLECTIONS := -collection:rifle=./src
+KCOV ?= kcov
 
 all: debug
 
@@ -40,6 +41,9 @@ test-e2e: c
 	cc -std=c11 -Wall -Wextra -Werror -I./bindings/c ./test/e2e/c_api_test.c -L./lib -lrifle -Wl,-rpath,'$$ORIGIN/../lib' -o ./bin/c-api-e2e-test
 	./bin/c-api-e2e-test
 
+coverage:
+	KCOV="$(KCOV)" ./scripts/coverage.sh
+
 docs:
 	mkdir -p /docs/html
 	doxygen Doxyfile
@@ -47,5 +51,6 @@ docs:
 clean:
 	rm -rf bin
 	rm -rf lib
+	rm -rf coverage
 	rm -rf example/data*
 	rm -rf docs/html

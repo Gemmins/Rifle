@@ -136,9 +136,9 @@ given_bootstrapped_arena_when_allocating_from_end_then_front_space_is_not_crosse
 }
 
 @(test)
-given_aligned_allocator_head_when_allocating_then_no_extra_alignment_block_is_skipped :: proc(t: ^testing.T) {
+given_allocator_heads_and_alignments_when_allocating_then_only_unaligned_heads_are_advanced :: proc(t: ^testing.T) {
 	// Arrange
-	fd, create_err := linux.memfd_create("rifle-arena-aligned-head-test", {.CLOEXEC})
+	fd, create_err := linux.memfd_create("rifle-arena-alignment-cases-test", {.CLOEXEC})
 	if !testing.expect_value(t, create_err, linux.Errno.NONE) {
 		return
 	}
@@ -150,17 +150,33 @@ given_aligned_allocator_head_when_allocating_then_no_extra_alignment_block_is_sk
 	}
 	defer rifle.destroy_file_backed_arena(&owner.arena)
 	allocator := runtime.Allocator{owner.arena.allocator_proc, &owner.arena}
-	initial_head := owner.arena.allocator_head
-	alignment := int(align_of(Arena_Test_Owner))
-	if !testing.expect_value(t, initial_head % i64(alignment), i64(0)) {
-		return
+	cases := [?]struct {
+		name:      string,
+		head:      i64,
+		alignment: int,
+		expected:  i64,
+	}{
+		{"zero alignment", 129, 0, 129},
+		{"unit alignment", 129, 1, 129},
+		{"already aligned", 128, 16, 128},
+		{"unaligned", 129, 16, 144},
 	}
 
 	// Act
-	allocation, err := allocator.procedure(allocator.data, .Alloc, 16, alignment, nil, 0)
-	offset := i64(uintptr(raw_data(allocation))) - i64(uintptr(owner.arena.base))
+	for test_case in cases {
+		owner.arena.allocator_head = test_case.head
+		allocation, err := allocator.procedure(allocator.data, .Alloc, 16, test_case.alignment, nil, 0)
+		offset := i64(uintptr(raw_data(allocation))) - i64(uintptr(owner.arena.base))
 
-	// Assert
-	testing.expect_value(t, err, runtime.Allocator_Error.None)
-	testing.expect_value(t, offset, initial_head)
+		// Assert
+		testing.expectf(t, err == .None, "%s: allocation failed with %v", test_case.name, err)
+		testing.expectf(
+			t,
+			offset == test_case.expected,
+			"%s: expected offset %d, got %d",
+			test_case.name,
+			test_case.expected,
+			offset,
+		)
+	}
 }

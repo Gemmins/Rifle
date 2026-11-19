@@ -505,6 +505,45 @@ given_out_of_order_writer_waiting_for_visibility_when_earlier_writer_completes_t
 }
 
 @(test)
+given_aliased_future_commit_slot_when_intermediate_range_is_missing_then_visibility_waits_for_gap_and_advances_in_order :: proc(t: ^testing.T) {
+	// Arrange
+	fixture := cache_test_setup(t)
+	entered: sync.Sema
+	later := Cache_Test_Write_Worker{cache = fixture.cache, entered = &entered, data = {9}}
+	later_thread := thread.create(cache_test_write_out_of_order)
+	later_thread.data = &later
+	first := [2]i64{1, 2}
+	first_bytes := (cast([^]u8)raw_data(first[:]))[:size_of(first)]
+	middle := [6]i64{3, 4, 5, 6, 7, 8}
+	middle_bytes := (cast([^]u8)raw_data(middle[:]))[:size_of(middle)]
+
+	// Act
+	thread.start(later_thread)
+	if !testing.expect(t, sync.sema_wait_with_timeout(&entered, time.Second)) {
+		thread.join(later_thread)
+		thread.destroy(later_thread)
+		return
+	}
+	first_err := fixture.cache.write(fixture.cache.data, first_bytes, 0, len(first))
+	thread.join(later_thread)
+	thread.destroy(later_thread)
+	visible_with_gap := fixture.visible
+	middle_err := fixture.cache.write(fixture.cache.data, middle_bytes, 2, len(middle))
+
+	// Assert
+	testing.expect_value(t, first_err, rifle.RifleError.None)
+	testing.expect_value(t, later.err, rifle.RifleError.None)
+	testing.expect_value(t, visible_with_gap, i64(2))
+	testing.expect_value(t, middle_err, rifle.RifleError.None)
+	testing.expect_value(t, fixture.visible, i64(9))
+	cache := cast(^rifle.RecordCache)fixture.cache.data
+	values := cast([^]i64)raw_data(cache.ring_data)
+	for i in 0 ..< 9 {
+		testing.expect_value(t, values[i], i64(i + 1))
+	}
+}
+
+@(test)
 given_zero_record_ranges_when_read_or_written_then_cache_state_and_io_remain_unchanged :: proc(t: ^testing.T) {
 	// Arrange
 	fixture := cache_test_setup(t)
@@ -689,7 +728,7 @@ given_failed_file_unlink_when_polled_again_then_same_file_is_retried :: proc(t: 
 }
 
 @(test)
-given_partial_page_of_visible_records_when_sync_is_requested_then_data_write_is_queued_before_sync :: proc(t: ^testing.T) {
+given_partial_page_of_visible_records_when_sync_is_requested_then_aligned_zero_padded_data_write_is_queued_before_sync :: proc(t: ^testing.T) {
 	// Arrange
 	fixture := cache_test_setup(t)
 	data := [1]i64{41}
@@ -700,11 +739,75 @@ given_partial_page_of_visible_records_when_sync_is_requested_then_data_write_is_
 	// Act
 	_, poll_err := fixture.cache.poll(fixture.cache.data)
 	write_request := cache_test_io_find(&fixture.fake, .WRITE)
+	queued_size := 0
+	queued_offset: u64
+	queued_file := i64(-1)
+	queued_alignment: uintptr
+	queued_prefix: i64
+	padding_is_zero := false
+	if write_request >= 0 {
+		request := fixture.fake.requests[write_request]
+		queued_size = len(request.buffer)
+		queued_offset = request.offset
+		queued_file = request.file_id
+		queued_alignment = uintptr(raw_data(request.buffer)) % uintptr(CACHE_TEST_PAGE_SIZE)
+		queued_prefix = (cast(^i64)raw_data(request.buffer))^
+		padding_is_zero = true
+		for value in request.buffer[size_of(i64):] {
+			padding_is_zero = padding_is_zero && value == 0
+		}
+	}
+	cache := cast(^rifle.RecordCache)fixture.cache.data
 
 	// Assert
 	testing.expect_value(t, write_err, rifle.RifleError.None)
 	testing.expect_value(t, poll_err, rifle.RifleError.None)
 	testing.expect(t, write_request >= 0)
+	testing.expect_value(t, queued_size, int(CACHE_TEST_PAGE_SIZE))
+	testing.expect_value(t, queued_offset, u64(0))
+	testing.expect_value(t, queued_file, i64(0))
+	testing.expect_value(t, queued_alignment, uintptr(0))
+	testing.expect_value(t, queued_prefix, i64(41))
+	testing.expect(t, padding_is_zero)
+	testing.expect_value(t, cache.writing_byte_index % cache.page_size, i64(0))
+}
+
+@(test)
+given_more_records_after_persisted_partial_page_when_synced_then_same_tail_page_is_rewritten_with_all_visible_data :: proc(t: ^testing.T) {
+	// Arrange
+	fixture := cache_test_setup(t)
+	cache := cast(^rifle.RecordCache)fixture.cache.data
+	first := [1]i64{41}
+	first_bytes := (cast([^]u8)raw_data(first[:]))[:size_of(first)]
+	first_write_err := fixture.cache.write(fixture.cache.data, first_bytes, 0, 1)
+	fixture.persisted = 1
+	fixture.durable = 1
+	cache.persisted_byte_index = size_of(i64)
+	cache.writing_byte_index = 0
+	more := [2]i64{42, 43}
+	more_bytes := (cast([^]u8)raw_data(more[:]))[:size_of(more)]
+	more_write_err := fixture.cache.write(fixture.cache.data, more_bytes, 1, 2)
+	fixture.cache.sync(fixture.cache.data)
+
+	// Act
+	_, poll_err := fixture.cache.poll(fixture.cache.data)
+	write_request := cache_test_io_find(&fixture.fake, .WRITE)
+	queued_values: [3]i64
+	queued_offset: u64 = max(u64)
+	if write_request >= 0 {
+		request := fixture.fake.requests[write_request]
+		copy(queued_values[:], (cast([^]i64)raw_data(request.buffer))[:len(queued_values)])
+		queued_offset = request.offset
+	}
+
+	// Assert
+	testing.expect_value(t, first_write_err, rifle.RifleError.None)
+	testing.expect_value(t, more_write_err, rifle.RifleError.None)
+	testing.expect_value(t, poll_err, rifle.RifleError.None)
+	testing.expect(t, write_request >= 0)
+	testing.expect_value(t, queued_offset, u64(0))
+	testing.expect_value(t, queued_values, [3]i64{41, 42, 43})
+	testing.expect_value(t, cache.writing_byte_index % cache.page_size, i64(0))
 }
 
 @(test)
