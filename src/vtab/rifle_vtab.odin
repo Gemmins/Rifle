@@ -13,6 +13,7 @@ Vtab :: struct {
 	base_file: linux.Fd,
 }
 
+// Move to a union here once more index types introduced
 Cursor :: struct {
 	using _:      sqlite.Vtab_Cursor,
 	record_index: i64,
@@ -20,12 +21,21 @@ Cursor :: struct {
 	files:        map[i64]linux.Fd,
 	min_index:    i64,
 	max_index:    i64,
+	direction:    i8,
 }
 
 Page :: struct {
 	index: i64,
 	data:  []u8,
 }
+
+// Even for asc odd for desc
+IndexType :: enum i32 {
+	ROWID_RANGE_ASC = 0,
+	ROWID_RANGE_DSC = 1,
+}
+
+PAGE_SIZE :: 1 << 13
 
 connect :: proc "c" (db: ^sqlite.Connection, pAux: rawptr, argc: i32, argv: [^]cstring, ppVTab: ^^sqlite.Vtab, _: ^cstring) -> i32 {
 	context = runtime.default_context()
@@ -64,6 +74,71 @@ connect :: proc "c" (db: ^sqlite.Connection, pAux: rawptr, argc: i32, argv: [^]c
 }
 
 best_index :: proc "c" (pVTab: ^sqlite.Vtab, index_info: ^sqlite.Index_Info) -> i32 {
+	context = runtime.default_context()
+	vtab := cast(^Vtab)pVTab
+
+	idxStr := (cast([^]u8)sqlite.malloc(index_info.nConstraint + 1))[:index_info.nConstraint + 1]
+	if raw_data(idxStr) == nil {
+		return sqlite.NOMEM
+	}
+	index_info.idxStr = cstring(raw_data(idxStr))
+	index_info.needToFreeIdxStr = 1
+
+	total_rows := vtab.log_data.head - vtab.log_data.tail
+	is_rowid := false
+	upper := false
+	lower := false
+	constraints: i32 = 0
+
+	loop: for constraint, i in index_info.aConstraint[:index_info.nConstraint] {
+		if constraint.usable == 0 || constraint.iColumn != -1 { 	// Only rowid for now
+			continue
+		}
+		is_rowid = true
+		switch constraint.op {
+		case sqlite.INDEX_CONSTRAINT_EQ:
+			total_rows = 1
+			index_info.aConstraintUsage[i] = sqlite.Index_Constraint_Usage{constraints + 1, 0}
+			idxStr[constraints] = constraint.op
+			constraints += 1
+			index_info.idxFlags |= sqlite.INDEX_SCAN_UNIQUE
+			break loop
+		case sqlite.INDEX_CONSTRAINT_GE, sqlite.INDEX_CONSTRAINT_GT:
+			if !lower {
+				total_rows /= 2
+				lower = true
+			}
+			index_info.aConstraintUsage[i] = sqlite.Index_Constraint_Usage{constraints + 1, 0}
+			idxStr[constraints] = constraint.op
+			constraints += 1
+		case sqlite.INDEX_CONSTRAINT_LE, sqlite.INDEX_CONSTRAINT_LT:
+			if !upper {
+				total_rows /= 2
+				upper = true
+			}
+			index_info.aConstraintUsage[i] = sqlite.Index_Constraint_Usage{constraints + 1, 0}
+			idxStr[constraints] = constraint.op
+			constraints += 1
+		case sqlite.INDEX_CONSTRAINT_NE:
+			total_rows -= 1
+			index_info.aConstraintUsage[i] = sqlite.Index_Constraint_Usage{constraints + 1, 0}
+			idxStr[constraints] = constraint.op
+			constraints += 1
+		case:
+		}
+	}
+	// should maybe guard fields on sqlite version
+	index_info.estimatedRows = total_rows
+	index_info.estimatedCost = cast(f64)((total_rows * vtab.log_data.record_size) / PAGE_SIZE)
+	if is_rowid {
+		index_info.idxNum = (cast(i32)IndexType.ROWID_RANGE_ASC)
+	}
+	if index_info.nOrderBy == 1 && index_info.aOrderBy[0].iColumn == -1 {
+		index_info.orderByConsumed = 1
+		index_info.idxNum += cast(i32)index_info.aOrderBy[0].desc
+	}
+	idxStr[constraints] = 0
+
 	return 0
 }
 
@@ -90,7 +165,7 @@ open :: proc "c" (pVTab: ^sqlite.Vtab, ppCursor: ^^sqlite.Vtab_Cursor) -> i32 {
 
 	cursor.pVtab = pVTab
 	cursor.current_page.index = -1
-	cursor.current_page.data = make_aligned([]u8, 1 << 13, 1 << 12) //TODO: configure
+	cursor.current_page.data = make_aligned([]u8, PAGE_SIZE, 1 << 12) //TODO: configure
 	cursor.files = make(map[i64]linux.Fd)
 
 	ppCursor^ = cursor
@@ -118,27 +193,61 @@ filter :: proc "c" (pCursor: ^sqlite.Vtab_Cursor, idxNum: i32, idxStr: cstring, 
 	context = runtime.default_context()
 	cursor := cast(^Cursor)pCursor
 	vtab := cast(^Vtab)cursor.pVtab
+	idxOps := cast([^]u8)idxStr
 
-	// Should maybe do a re-read of the base file atp
-	if argc == 0 {
-		cursor.min_index = vtab.log_data.tail
-		cursor.max_index = vtab.log_data.head - 1
+	// Should do a re-read of the base file atp
+	cursor.min_index = vtab.log_data.tail
+	cursor.max_index = vtab.log_data.head
+	cursor.direction = bool(idxNum & 1) ? -1 : 1
+
+	if argc != 0 {
+		switch cast(IndexType)idxNum {
+		case .ROWID_RANGE_ASC, .ROWID_RANGE_DSC:
+			for constraint_value, i in argv[:argc] {
+				constraint_value := sqlite.value_int64(constraint_value)
+				op := idxOps[i]
+				switch op {
+				case sqlite.INDEX_CONSTRAINT_EQ:
+					cursor.max_index = constraint_value + 1
+					cursor.min_index = constraint_value
+				case sqlite.INDEX_CONSTRAINT_GT:
+					if cursor.min_index < constraint_value + 1 {
+						cursor.min_index = constraint_value + 1
+					}
+				case sqlite.INDEX_CONSTRAINT_GE:
+					if cursor.min_index < constraint_value {
+						cursor.min_index = constraint_value
+					}
+				case sqlite.INDEX_CONSTRAINT_LT:
+					if cursor.max_index > constraint_value {
+						cursor.max_index = constraint_value
+					}
+				case sqlite.INDEX_CONSTRAINT_LE:
+					if cursor.max_index > constraint_value + 1 {
+						cursor.max_index = constraint_value + 1
+					}
+				}
+			}
+		case: // For when more are added
+		}
 	}
+
 
 	// Currently return errror if cant open file (may have been dropped)
 	// Should change this to re-calculating min based off of which files we managed to open
+	cursor.record_index = cursor.direction < 1 ? cursor.max_index - 1 : cursor.min_index
 	return open_files(cursor, cursor.min_index, cursor.max_index)
 }
 
 next :: proc "c" (pCursor: ^sqlite.Vtab_Cursor) -> i32 {
 	cursor := cast(^Cursor)pCursor
-	cursor.record_index += 1
+	cursor.record_index += cast(i64)cursor.direction
 	return sqlite.OK
 }
 
 eof :: proc "c" (pCursor: ^sqlite.Vtab_Cursor) -> i32 {
 	cursor := cast(^Cursor)pCursor
-	if cursor.record_index > cursor.max_index || cursor.record_index < cursor.min_index {
+	if cursor.record_index >= cursor.max_index || cursor.record_index < cursor.min_index {
 		return 1
 	}
 	return 0
@@ -161,7 +270,7 @@ column :: proc "c" (pCursor: ^sqlite.Vtab_Cursor, pContext: ^sqlite.Context, N: 
 	// For now, records must fit within a single page.
 	field_offset := record_offset % page_size + field.offset
 	column_data := cursor.current_page.data[field_offset:][:field.size]
-
+	// possible unaligned loads here, maybe indicate as such
 	switch field.type {
 	case .I8:
 		sqlite.result_int(pContext, i32((cast(^i8)raw_data(column_data))^))
@@ -194,6 +303,7 @@ column :: proc "c" (pCursor: ^sqlite.Vtab_Cursor, pContext: ^sqlite.Context, N: 
 	case .Bytes:
 		sqlite.result_blob64(pContext, raw_data(column_data), u64(len(column_data)), sqlite.TRANSIENT)
 	case .Text:
+		// Look at slicing for nul termination
 		sqlite.result_text64(pContext, cast(cstring)raw_data(column_data), u64(len(column_data)), sqlite.TRANSIENT, sqlite.UTF8)
 	case .Invalid:
 		sqlite.result_error(pContext, "Invalid field type", -1)
